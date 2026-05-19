@@ -36,6 +36,13 @@ _COMPARE_OPS: Final[frozenset[str]] = frozenset({"eq", "neq", "lt", "lte", "gt",
 _OTHER_OPS: Final[frozenset[str]] = frozenset({"in", "is_null"})
 _ALL_OPS: Final[frozenset[str]] = _LOGIC_OPS | _COMPARE_OPS | _OTHER_OPS
 
+# Known domain-reference namespaces. The validator accepts these as opaque
+# `{ <namespace>: "field.path" }` references and trusts the domain's Resolver
+# to validate the field name at evaluate time. Adding a new domain (e.g. for
+# documents, runs) means adding its namespace here so the AST validator stops
+# silently accepting `{"<typo>": ...}` as a domain reference.
+_KNOWN_NAMESPACES: Final[frozenset[str]] = frozenset({"row", "file"})
+
 _DEPTH_LIMIT: Final[int] = 64
 
 
@@ -73,14 +80,19 @@ def _validate_operand(node: Any, depth: int = 0, path: str = "$") -> None:
         if op in _ALL_OPS:
             _validate_op_node(op, node[op], depth=depth, path=path)
             return
-        # Treat as a domain reference: `{ <namespace>: "path.path" }`.
-        # We validate the *shape* here; the Resolver validates the field name.
-        ref = node[op]
-        if not isinstance(ref, str) or not ref:
-            raise ValueError(
-                f"{path}: {op!r} reference must be a non-empty string, got {ref!r}"
-            )
-        return
+        if op in _KNOWN_NAMESPACES:
+            # Domain reference: `{ <namespace>: "path.path" }`.
+            # Shape validated here; the Resolver validates the field name.
+            ref = node[op]
+            if not isinstance(ref, str) or not ref:
+                raise ValueError(
+                    f"{path}: {op!r} reference must be a non-empty string, got {ref!r}"
+                )
+            return
+        raise ValueError(
+            f"{path}: unknown operator or namespace {op!r}; "
+            f"operators: {sorted(_ALL_OPS)}, namespaces: {sorted(_KNOWN_NAMESPACES)}"
+        )
     raise ValueError(
         f"{path}: operator node must have exactly one key, got {sorted(keys)}"
     )

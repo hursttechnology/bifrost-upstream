@@ -650,16 +650,19 @@ class WorkflowExecutionConsumer(BaseConsumer):
                 started_at=start_time,
             )
 
-            # Load organization
+            # Rehydrate the org from org_id (the enqueue boundary only carried
+            # the scalar org_id, not the Organization object built API-side).
+            # is_provider MUST come through here — it is the SDK-side C2
+            # scope-bypass flag the worker hands to resolve_scope. See
+            # OrganizationRepository.get_with_cache.
             org = None
             org_data = None
 
             if org_id:
-                from src.core.config_resolver import ConfigResolver
+                from src.repositories.organizations import OrganizationRepository
 
-                resolver = ConfigResolver()
                 async with get_db_context() as db:
-                    org = await resolver.get_organization(org_id, db=db)
+                    org = await OrganizationRepository(db).get_with_cache(org_id)
                 if org:
                     org_data = {
                         "id": org.id,

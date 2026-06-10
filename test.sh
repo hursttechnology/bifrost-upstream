@@ -240,6 +240,13 @@ run_pytest() {
     # changed migrations they should run `./test.sh stack reset` once.
     require_stack_up
     reset_state
+    # LOG_DIR is mkdir'd on the host as the runner/host user, then bind-mounted
+    # into the test-runner container at /tmp/bifrost. The container runs as
+    # uid 1000 (non-root, hardened), so it cannot write pytest's --junitxml file
+    # into a dir it doesn't own -> PermissionError [Errno 13] at pytest exit, and
+    # the whole session is reported as ERROR even though every test ran. Make the
+    # mount dir world-writable so the uid-1000 container can write results into it.
+    chmod 777 "$LOG_DIR" 2>/dev/null || true
     docker compose -f "$COMPOSE_FILE" --profile test run --rm test-runner \
         pytest "$@" --junitxml="/tmp/bifrost/test-results.xml" 2>&1 | tee "$LOG_DIR/test-runner.log"
     return "${PIPESTATUS[0]}"

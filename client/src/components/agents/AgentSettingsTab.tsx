@@ -24,7 +24,6 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import {
 	AlertTriangle,
-	Check,
 	ChevronsUpDown,
 	Info,
 	Loader2,
@@ -506,6 +505,10 @@ export function AgentSettingsTab({
 															<CommandItem
 																key={role.id}
 																value={role.name ?? ""}
+																data-checked={
+																	field.value?.includes(role.id) ??
+																	false
+																}
 																onSelect={() => {
 																	const current = field.value ?? [];
 																	field.onChange(
@@ -517,31 +520,16 @@ export function AgentSettingsTab({
 																	);
 																}}
 															>
-																<div className="flex flex-1 items-center gap-2">
-																	<Checkbox
-																		checked={field.value?.includes(
-																			role.id,
-																		)}
-																	/>
-																	<div className="flex flex-col">
-																		<span className="font-medium">
-																			{role.name}
+																<div className="flex flex-col flex-1">
+																	<span className="font-medium">
+																		{role.name}
+																	</span>
+																	{role.description ? (
+																		<span className="text-xs text-muted-foreground">
+																			{role.description}
 																		</span>
-																		{role.description ? (
-																			<span className="text-xs text-muted-foreground">
-																				{role.description}
-																			</span>
-																		) : null}
-																	</div>
+																	) : null}
 																</div>
-																<Check
-																	className={cn(
-																		"ml-auto h-4 w-4",
-																		field.value?.includes(role.id)
-																			? "opacity-100"
-																			: "opacity-0",
-																	)}
-																/>
 															</CommandItem>
 														))}
 													</CommandGroup>
@@ -550,7 +538,7 @@ export function AgentSettingsTab({
 										</PopoverContent>
 									</Popover>
 									{field.value?.length ? (
-										<div className="flex flex-wrap gap-1.5 rounded-md border bg-muted/40 p-2">
+										<div className="flex flex-wrap gap-1.5 rounded-md bg-muted/50 ring-1 ring-foreground/5 p-2">
 											{field.value.map((roleId) => {
 												const role = roles?.find(
 													(r: RolePublic) => r.id === roleId,
@@ -596,7 +584,7 @@ export function AgentSettingsTab({
 						control={form.control}
 						name="is_active"
 						render={({ field }) => (
-							<FormItem className="flex items-center justify-between gap-3 rounded-md border bg-muted/30 px-3 py-2.5">
+							<FormItem className="flex items-center justify-between gap-3 rounded-md bg-muted/50 ring-1 ring-foreground/5 px-3 py-2.5">
 								<div className="flex flex-col">
 									<FormLabel className="m-0">
 										{field.value ? "Agent is active" : "Agent is paused"}
@@ -852,6 +840,9 @@ export function AgentSettingsTab({
 													<CommandItem
 														key={tool.id}
 														value={`system-${tool.name}`}
+														data-checked={
+															systemTools?.includes(tool.id) ?? false
+														}
 														onSelect={() => {
 															const current = systemTools ?? [];
 															form.setValue(
@@ -862,14 +853,6 @@ export function AgentSettingsTab({
 															);
 														}}
 													>
-														<Check
-															className={cn(
-																"mr-2 h-4 w-4",
-																systemTools?.includes(tool.id)
-																	? "opacity-100"
-																	: "opacity-0",
-															)}
-														/>
 														<div className="flex flex-col">
 															<span className="font-mono text-sm">
 																{tool.id}
@@ -897,6 +880,9 @@ export function AgentSettingsTab({
 															data-mismatch={
 																isMismatch ? "true" : undefined
 															}
+															data-checked={
+																toolIds?.includes(tool.id) ?? false
+															}
 															onSelect={() => {
 																if (isMismatch) return;
 																const current = toolIds ?? [];
@@ -910,14 +896,6 @@ export function AgentSettingsTab({
 																);
 															}}
 														>
-															<Check
-																className={cn(
-																	"mr-2 h-4 w-4",
-																	toolIds?.includes(tool.id)
-																		? "opacity-100"
-																		: "opacity-0",
-																)}
-															/>
 															<div className="flex flex-col">
 																<span>
 																	{tool.name}
@@ -1060,6 +1038,10 @@ export function AgentSettingsTab({
 														<CommandItem
 															key={delegate.id}
 															value={delegate.name}
+															data-checked={
+																field.value?.includes(delegate.id) ??
+																false
+															}
 															onSelect={() => {
 																const current = field.value ?? [];
 																field.onChange(
@@ -1071,14 +1053,6 @@ export function AgentSettingsTab({
 																);
 															}}
 														>
-															<Check
-																className={cn(
-																	"mr-2 h-4 w-4",
-																	field.value?.includes(delegate.id)
-																		? "opacity-100"
-																		: "opacity-0",
-																)}
-															/>
 															<div className="flex flex-col">
 																<span>{delegate.name}</span>
 																{delegate.description ? (
@@ -1123,7 +1097,7 @@ export function AgentSettingsTab({
 									/>
 								</FormControl>
 								{field.value?.length ? (
-									<div className="flex items-center gap-2 rounded-md border bg-muted/30 p-2">
+									<div className="flex items-center gap-2 rounded-md bg-muted/50 ring-1 ring-foreground/5 p-2">
 										<Badge
 											variant="secondary"
 											className="font-mono text-xs"
@@ -1392,7 +1366,7 @@ function AgentMCPConnectionsPanelInner({
 	if (connections.length === 0) {
 		return (
 			<div
-				className="rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground"
+				className="rounded-md bg-muted/50 ring-1 ring-foreground/5 p-3 text-xs text-muted-foreground"
 				data-testid="agent-mcp-connections-panel-empty"
 			>
 				This organization has no MCP connections. Add one from the MCP
@@ -1403,7 +1377,7 @@ function AgentMCPConnectionsPanelInner({
 
 	return (
 		<div
-			className="rounded-md border bg-muted/20 p-3 space-y-3"
+			className="rounded-md bg-muted/50 ring-1 ring-foreground/5 p-3 space-y-3"
 			data-testid="agent-mcp-connections-panel"
 		>
 			<div>

@@ -922,7 +922,7 @@ export function SourceControlPanel() {
 				<button
 					onClick={handleFetch}
 					disabled={!!loading}
-					className="p-1.5 rounded hover:bg-muted/50 transition-colors disabled:opacity-50"
+					className="p-1.5 rounded-md hover:bg-muted/50 transition-colors disabled:opacity-50"
 					title="Fetch from remote"
 				>
 					{loading === "fetching" ? (
@@ -1225,7 +1225,7 @@ function ChangesSection({
 
 					{/* Orphaned cleanup banner */}
 					{showCleanupPrompt && (
-						<div className="mx-4 mb-2 p-2.5 rounded border border-yellow-500/30 bg-yellow-500/10 flex-shrink-0">
+						<div className="mx-4 mb-2 p-2.5 rounded-md bg-yellow-500/10 ring-1 ring-yellow-500/30 flex-shrink-0">
 							<div className="flex items-start gap-2">
 								<AlertTriangle className="h-4 w-4 text-yellow-600 mt-0.5 flex-shrink-0" />
 								<div className="flex-1 min-w-0">
@@ -1269,7 +1269,7 @@ function ChangesSection({
 
 					{/* Pending deletes confirmation banner */}
 					{pendingDeletes && pendingDeletes.length > 0 && (
-						<div className="mx-4 mb-2 p-2.5 rounded border border-red-500/30 bg-red-500/10 flex-shrink-0">
+						<div className="mx-4 mb-2 p-2.5 rounded-md bg-red-500/10 ring-1 ring-red-500/30 flex-shrink-0">
 							<div className="flex items-start gap-2">
 								<AlertTriangle className="h-4 w-4 text-red-600 mt-0.5 flex-shrink-0" />
 								<div className="flex-1 min-w-0">
@@ -1349,7 +1349,7 @@ function ChangesSection({
 											key={`conflict-${conflict.path}`}
 											onClick={() => onShowConflictDiff(conflict)}
 											className={cn(
-												"group flex items-center gap-1.5 text-xs py-1.5 px-2 rounded cursor-pointer",
+												"group flex items-center gap-1.5 text-xs py-1.5 px-2 rounded-md cursor-pointer",
 												!resolution && "border-l-2 border-orange-500 hover:bg-orange-500/5",
 												resolution && "border-l-2 border-green-500 hover:bg-green-500/5",
 											)}
@@ -1373,7 +1373,7 @@ function ChangesSection({
 														onResolveConflict(conflict.path, "ours");
 													}}
 													className={cn(
-														"px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors",
+														"px-1.5 py-0.5 rounded-md text-[10px] font-medium transition-colors",
 														resolution === "ours"
 															? "bg-blue-500/20 text-blue-400"
 															: "bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -1388,7 +1388,7 @@ function ChangesSection({
 														onResolveConflict(conflict.path, "theirs");
 													}}
 													className={cn(
-														"px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors",
+														"px-1.5 py-0.5 rounded-md text-[10px] font-medium transition-colors",
 														resolution === "theirs"
 															? "bg-purple-500/20 text-purple-400"
 															: "bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -1412,7 +1412,7 @@ function ChangesSection({
 										<div
 											key={file.path}
 											onClick={() => onShowDiff(file)}
-											className="group flex items-center gap-2 text-xs py-1.5 px-2 rounded hover:bg-muted/30 cursor-pointer"
+											className="group flex items-center gap-2 text-xs py-1.5 px-2 rounded-md hover:bg-muted/30 cursor-pointer"
 										>
 											{getChangeIcon(file.change_type)}
 											<IconComponent className={cn("h-3.5 w-3.5 flex-shrink-0", iconClassName)} />
@@ -1425,7 +1425,7 @@ function ChangesSection({
 														e.stopPropagation();
 														onDiscard(file);
 													}}
-													className="hidden group-hover:block p-0.5 rounded hover:bg-muted/80 flex-shrink-0"
+													className="hidden group-hover:block p-0.5 rounded-md hover:bg-muted/80 flex-shrink-0"
 													title="Discard changes"
 												>
 													<Undo2 className="h-3 w-3 text-muted-foreground" />
@@ -1527,7 +1527,7 @@ function CommitsSection({
 								{commits.map((commit) => (
 									<div
 										key={commit.sha}
-										className="group flex items-start gap-2 px-2 py-2 rounded hover:bg-muted/30 transition-colors"
+										className="group flex items-start gap-2 px-2 py-2 rounded-md hover:bg-muted/30 transition-colors"
 									>
 										{commit.is_pushed ? (
 											<CheckCircle2 className="h-3.5 w-3.5 text-green-500 flex-shrink-0 mt-0.5" />

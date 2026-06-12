@@ -14,12 +14,11 @@
  */
 
 import { useState } from "react";
-import { Check, ChevronsUpDown, Lock, Users } from "lucide-react";
+import { ChevronsUpDown, Lock, Users } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
 	Command,
 	CommandEmpty,
@@ -261,72 +260,47 @@ function CreateWorkspaceForm({
 											<CommandGroup>
 												<CommandItem
 													value="__everyone__"
+													data-checked={roleId === null}
 													onSelect={() => {
 														setRoleId(null);
 														setRolesOpen(false);
 													}}
 												>
-													<div className="flex flex-1 items-center gap-2">
-														<Checkbox
-															checked={roleId === null}
-														/>
-														<div className="flex flex-col">
-															<span className="font-medium">
-																Everyone in my organization
-															</span>
-															<span className="text-xs text-muted-foreground">
-																Default
-															</span>
-														</div>
+													<div className="flex flex-col flex-1">
+														<span className="font-medium">
+															Everyone in my organization
+														</span>
+														<span className="text-xs text-muted-foreground">
+															Default
+														</span>
 													</div>
-													<Check
-														className={cn(
-															"ml-auto h-4 w-4",
-															roleId === null
-																? "opacity-100"
-																: "opacity-0",
-														)}
-													/>
 												</CommandItem>
 												{(roles ?? []).map(
 													(role: RolePublic) => (
 														<CommandItem
 															key={role.id}
 															value={role.name ?? ""}
+															data-checked={
+																roleId ===
+																role.id
+															}
 															onSelect={() => {
 																setRoleId(role.id);
 																setRolesOpen(false);
 															}}
 														>
-															<div className="flex flex-1 items-center gap-2">
-																<Checkbox
-																	checked={
-																		roleId ===
-																		role.id
-																	}
-																/>
-																<div className="flex flex-col">
-																	<span className="font-medium">
-																		{role.name}
+															<div className="flex flex-col flex-1">
+																<span className="font-medium">
+																	{role.name}
+																</span>
+																{role.description ? (
+																	<span className="text-xs text-muted-foreground">
+																		{
+																			role.description
+																		}
 																	</span>
-																	{role.description ? (
-																		<span className="text-xs text-muted-foreground">
-																			{
-																				role.description
-																			}
-																		</span>
-																	) : null}
-																</div>
+																) : null}
 															</div>
-															<Check
-																className={cn(
-																	"ml-auto h-4 w-4",
-																	roleId ===
-																		role.id
-																		? "opacity-100"
-																		: "opacity-0",
-																)}
-															/>
 														</CommandItem>
 													),
 												)}

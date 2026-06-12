@@ -20,7 +20,7 @@
  */
 
 import { useMemo, useState } from "react";
-import { Check, ChevronsUpDown, FileText, Hammer, Image, Mic, X } from "lucide-react";
+import { ChevronsUpDown, FileText, Hammer, Image, Mic, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -340,14 +340,9 @@ export function ModelSelect(props: Props) {
 											value={row.id}
 											keywords={[row.display, row.id]}
 											onSelect={() => toggle(row.id)}
+											data-checked={checked}
 											className="flex items-start gap-2 py-2"
 										>
-											<div
-												aria-hidden
-												className="mt-1 h-4 w-4 shrink-0 flex items-center justify-center"
-											>
-												{checked ? <Check className="h-4 w-4" /> : null}
-											</div>
 											<div className="flex-1 min-w-0">
 												<div className="text-sm">{row.display}</div>
 												<RowMeta row={row} />

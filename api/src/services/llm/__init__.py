@@ -16,6 +16,7 @@ Usage:
 
 from src.services.llm.base import (
     BaseLLMClient,
+    LLMImageContent,
     LLMMessage,
     LLMResponse,
     LLMStreamChunk,
@@ -26,6 +27,7 @@ from src.services.llm.factory import get_llm_client
 
 __all__ = [
     "BaseLLMClient",
+    "LLMImageContent",
     "LLMMessage",
     "LLMResponse",
     "LLMStreamChunk",

@@ -29,6 +29,19 @@ class ToolCallRequest:
 
 
 @dataclass
+class LLMImageContent:
+    """An image attachment to render as a provider vision content block.
+
+    ``data`` is the raw image bytes; provider clients base64-encode and wrap it
+    in the provider-specific block shape (Anthropic ``image`` / OpenAI
+    ``image_url``).
+    """
+
+    media_type: str
+    data: bytes
+
+
+@dataclass
 class LLMMessage:
     """
     Message in the conversation.
@@ -45,6 +58,11 @@ class LLMMessage:
     # For tool result messages
     tool_call_id: str | None = None
     tool_name: str | None = None
+
+    # For user messages with image attachments (vision). Only set when the
+    # resolved model supports vision — provider clients emit image blocks
+    # whenever this is non-empty.
+    images: list[LLMImageContent] | None = None
 
 
 @dataclass

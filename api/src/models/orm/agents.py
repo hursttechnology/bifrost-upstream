@@ -304,8 +304,55 @@ class Message(Base):
         back_populates="messages",
         foreign_keys="Message.conversation_id",
     )
+    attachments: Mapped[list["MessageAttachment"]] = relationship(
+        back_populates="message",
+        cascade="all, delete-orphan",
+        order_by="MessageAttachment.created_at",
+    )
 
     __table_args__ = (
         Index("ix_messages_conversation_sequence", "conversation_id", "sequence"),
         Index("ix_messages_parent_message_id", "parent_message_id"),
+    )
+
+
+class MessageAttachment(Base):
+    """User-uploaded file attached to a chat message.
+
+    Content lives in S3 under ``_attachments/{conversation_id}/{uuid}_{filename}``
+    (see AttachmentService); only metadata + extracted text live in the DB.
+    Bound to a message when the message is sent (see §3.3 of the chat UX spec).
+    """
+
+    __tablename__ = "message_attachments"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    # Nullable until bound: an attachment is uploaded to a conversation first,
+    # then bound to the user message at send time.
+    message_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"),
+        nullable=True,
+        default=None,
+    )
+    conversation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    s3_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Text extracted server-side (PDFs, CSVs, text files). NULL for images.
+    extracted_text: Mapped[str | None] = mapped_column(Text, default=None)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        server_default=text("NOW()"),
+    )
+
+    # Relationships
+    message: Mapped["Message | None"] = relationship(back_populates="attachments")
+
+    __table_args__ = (
+        Index("ix_message_attachments_message_id", "message_id"),
+        Index("ix_message_attachments_conversation_id", "conversation_id"),
     )

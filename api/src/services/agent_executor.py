@@ -38,6 +38,7 @@ from src.models.enums import MessageRole
 from src.models.orm import Agent, Conversation, Message, User, Workflow, Workspace
 from src.repositories.agents import AgentRepository
 from src.services.llm import (
+    LLMImageContent,
     LLMMessage,
     ToolCallRequest,
     ToolDefinition,
@@ -211,6 +212,7 @@ class AgentExecutor:
         enable_routing: bool = True,
         local_id: str | None = None,
         user: UserPrincipal | None = None,
+        attachment_ids: list[UUID] | None = None,
         _skip_save_user_message: bool = False,
         _user_message_id: UUID | None = None,
     ) -> AsyncIterator[ChatStreamChunk]:
@@ -292,6 +294,19 @@ class AgentExecutor:
                 )
                 user_msg_id = user_msg.id
 
+            # 3a. Bind any uploaded attachments to the user message.
+            if attachment_ids and user_msg_id is not None:
+                from src.services.attachments import AttachmentService
+
+                async with self._db() as session:
+                    svc = AttachmentService(session)
+                    await svc.bind_to_message(
+                        attachment_ids=attachment_ids,
+                        message_id=user_msg_id,
+                        conversation_id=conversation.id,
+                    )
+                    await session.commit()
+
             # 3b. Generate assistant message ID upfront and send message_start
             assistant_message_id = uuid4()
             yield ChatStreamChunk(
@@ -321,8 +336,51 @@ class AgentExecutor:
 
             # 4b. Delegation tools are now included by resolve_agent_tools
 
+            # 4c. Resolve which model to use for this turn via the chat-V2
+            # resolver. Agent-level llm_model is honored as a "message
+            # override" so existing per-agent model pinning still works.
+            # Resolved BEFORE building history so attachment image blocks can be
+            # gated on whether the model supports vision.
+            from shared.model_resolver import (
+                ModelResolutionContext,
+                model_supports_vision,
+                resolve_model,
+            )
+
+            from src.models.orm.users import UserRole as _UserRole
+
+            async with self._db() as session:
+                owner = await session.get(User, conversation.user_id)
+                if owner is None or owner.organization_id is None:
+                    raise ValueError(
+                        f"conversation {conversation.id} owner has no organization"
+                    )
+                role_id_rows = (
+                    await session.execute(
+                        select(_UserRole.role_id).where(
+                            _UserRole.user_id == conversation.user_id
+                        )
+                    )
+                ).all()
+                role_ids = tuple(rid for (rid,) in role_id_rows)
+                choice = await resolve_model(
+                    session,
+                    ModelResolutionContext(
+                        organization_id=owner.organization_id,
+                        user_id=conversation.user_id,
+                        role_ids=role_ids,
+                        workspace_id=conversation.workspace_id,
+                        conversation_current_model=conversation.current_model,
+                        message_override=(agent.llm_model if agent else None),
+                    ),
+                )
+                supports_vision = await model_supports_vision(session, choice.model_id)
+            model_override = choice.model_id
+
             # 5. Build message history and fix any corrupted ordering
-            messages = await self._build_message_history(agent, conversation)
+            messages = await self._build_message_history(
+                agent, conversation, include_images=supports_vision
+            )
             messages = self._fix_interleaved_messages(messages)
             messages = self._fix_dangling_tool_calls(messages)
 
@@ -389,42 +447,8 @@ IMPORTANT: When the user's request can be fulfilled using one of your tools, you
             total_input_tokens = 0
             total_output_tokens = 0
 
-            # Resolve which model to use for this turn via the chat-V2
-            # resolver. Agent-level llm_model is honored as a "message
-            # override" so existing per-agent model pinning still works.
-            from shared.model_resolver import (
-                ModelResolutionContext,
-                resolve_model,
-            )
-
-            from src.models.orm.users import UserRole as _UserRole
-
-            async with self._db() as session:
-                owner = await session.get(User, conversation.user_id)
-                if owner is None or owner.organization_id is None:
-                    raise ValueError(
-                        f"conversation {conversation.id} owner has no organization"
-                    )
-                role_id_rows = (
-                    await session.execute(
-                        select(_UserRole.role_id).where(
-                            _UserRole.user_id == conversation.user_id
-                        )
-                    )
-                ).all()
-                role_ids = tuple(rid for (rid,) in role_id_rows)
-                choice = await resolve_model(
-                    session,
-                    ModelResolutionContext(
-                        organization_id=owner.organization_id,
-                        user_id=conversation.user_id,
-                        role_ids=role_ids,
-                        workspace_id=conversation.workspace_id,
-                        conversation_current_model=conversation.current_model,
-                        message_override=(agent.llm_model if agent else None),
-                    ),
-                )
-            model_override = choice.model_id
+            # model_override / supports_vision were resolved before building
+            # message history (so attachment image blocks could be gated).
             max_tokens_override = agent.llm_max_tokens if agent else None
 
             # Track tool_call IDs across iterations to handle providers
@@ -914,10 +938,51 @@ IMPORTANT: When the user's request can be fulfilled using one of your tools, you
         ):
             yield chunk
 
+    async def _build_user_llm_message(
+        self, msg: Message, *, include_images: bool
+    ) -> LLMMessage:
+        """Build a user LLMMessage, folding in any bound attachments.
+
+        Image attachments become vision blocks (when ``include_images``);
+        extracted text from PDF/CSV/text attachments is appended inline to the
+        message content so non-vision models still see the file contents.
+        """
+        from src.services.attachments import (
+            AttachmentService,
+            load_message_attachments,
+        )
+
+        async with self._db() as session:
+            attachments = await load_message_attachments(session, msg.id)
+            if not attachments:
+                return LLMMessage(role="user", content=msg.content)
+            svc = AttachmentService(session)
+            assembled = await svc.build_llm_content(
+                attachments=attachments, include_images=include_images
+            )
+
+        content_parts = [p for p in (msg.content, assembled.text) if p]
+        content = "\n\n".join(content_parts) if content_parts else msg.content
+        images = (
+            [LLMImageContent(media_type=b.media_type, data=b.data) for b in assembled.images]
+            if assembled.images
+            else None
+        )
+        return LLMMessage(role="user", content=content, images=images)
+
     async def _build_message_history(
-        self, agent: Agent | None, conversation: Conversation
+        self,
+        agent: Agent | None,
+        conversation: Conversation,
+        *,
+        include_images: bool = False,
     ) -> list[LLMMessage]:
-        """Build the message history for LLM completion."""
+        """Build the message history for LLM completion.
+
+        ``include_images`` gates whether image attachments are emitted as vision
+        content blocks (only when the resolved model supports vision). Extracted
+        text from PDF/CSV/text attachments is always inlined regardless.
+        """
         messages: list[LLMMessage] = []
 
         # Add system prompt (use agent's prompt or configurable default for agentless chat)
@@ -966,9 +1031,8 @@ IMPORTANT: When the user's request can be fulfilled using one of your tools, you
         for msg in db_messages:
             if msg.role == MessageRole.USER:
                 messages.append(
-                    LLMMessage(
-                        role="user",
-                        content=msg.content,
+                    await self._build_user_llm_message(
+                        msg, include_images=include_images
                     )
                 )
             elif msg.role == MessageRole.ASSISTANT:

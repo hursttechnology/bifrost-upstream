@@ -209,10 +209,29 @@ class AnthropicClient(BaseLLMClient):
                 system_prompt = msg.content
 
             elif msg.role == "user":
-                result.append({
-                    "role": "user",
-                    "content": msg.content or "",
-                })
+                if msg.images:
+                    import base64
+
+                    user_blocks: list[ContentBlockParam] = []
+                    if msg.content:
+                        user_blocks.append(
+                            TextBlockParam(type="text", text=msg.content)
+                        )
+                    for img in msg.images:
+                        user_blocks.append({  # type: ignore[arg-type]
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": img.media_type,
+                                "data": base64.b64encode(img.data).decode("ascii"),
+                            },
+                        })
+                    result.append({"role": "user", "content": user_blocks})
+                else:
+                    result.append({
+                        "role": "user",
+                        "content": msg.content or "",
+                    })
 
             elif msg.role == "assistant":
                 # Build content blocks

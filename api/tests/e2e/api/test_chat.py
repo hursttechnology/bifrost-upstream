@@ -556,6 +556,116 @@ class TestMessagesWithLLM:
 
 
 # =============================================================================
+# Attachment Tests (M4 — §3)
+# =============================================================================
+
+
+class TestAttachments:
+    """Upload and binding of chat attachments."""
+
+    def test_upload_text_attachment(
+        self,
+        e2e_client,
+        platform_admin,
+        test_conversation,
+    ):
+        """Uploading a supported file returns attachment metadata."""
+        response = e2e_client.post(
+            f"/api/chat/conversations/{test_conversation['id']}/attachments",
+            files=[("files", ("notes.txt", b"hello attachment", "text/plain"))],
+            headers=platform_admin.headers,
+        )
+        assert response.status_code == 200, f"Upload failed: {response.text}"
+        data = response.json()
+        assert len(data["attachments"]) == 1
+        att = data["attachments"][0]
+        assert att["filename"] == "notes.txt"
+        assert att["content_type"] == "text/plain"
+        assert att["size_bytes"] == len(b"hello attachment")
+        assert att["has_extracted_text"] is True
+
+    def test_upload_rejects_unsupported_type(
+        self,
+        e2e_client,
+        platform_admin,
+        test_conversation,
+    ):
+        """Unsupported content types are rejected with 400."""
+        response = e2e_client.post(
+            f"/api/chat/conversations/{test_conversation['id']}/attachments",
+            files=[("files", ("a.zip", b"PK\x03\x04", "application/zip"))],
+            headers=platform_admin.headers,
+        )
+        assert response.status_code == 400, response.text
+
+    def test_upload_to_nonexistent_conversation(
+        self,
+        e2e_client,
+        platform_admin,
+    ):
+        """Uploading to a conversation the user doesn't own returns 404."""
+        import uuid
+
+        response = e2e_client.post(
+            f"/api/chat/conversations/{uuid.uuid4()}/attachments",
+            files=[("files", ("a.txt", b"x", "text/plain"))],
+            headers=platform_admin.headers,
+        )
+        assert response.status_code == 404, response.text
+
+    def test_send_with_attachment_binds_to_message(
+        self,
+        e2e_client,
+        platform_admin,
+        test_conversation,
+        llm_anthropic_configured,
+    ):
+        """Sending a message with attachment_ids binds them; get_messages shows them."""
+        import time
+
+        up = e2e_client.post(
+            f"/api/chat/conversations/{test_conversation['id']}/attachments",
+            files=[("files", ("data.csv", b"a,b\n1,2\n", "text/csv"))],
+            headers=platform_admin.headers,
+        )
+        assert up.status_code == 200, up.text
+        attachment_id = up.json()["attachments"][0]["id"]
+
+        for attempt in range(3):
+            resp = e2e_client.post(
+                f"/api/chat/conversations/{test_conversation['id']}/messages",
+                json={
+                    "message": "Summarize the attached file in one word.",
+                    "attachment_ids": [attachment_id],
+                },
+                headers=platform_admin.headers,
+                timeout=30.0,
+            )
+            if resp.status_code == 200:
+                break
+            if resp.status_code == 500 and (
+                "overloaded" in resp.text.lower() or "rate" in resp.text.lower()
+            ):
+                time.sleep(2 ** attempt)
+                continue
+            break
+        assert resp.status_code == 200, f"Send failed: {resp.text}"
+
+        msgs = e2e_client.get(
+            f"/api/chat/conversations/{test_conversation['id']}/messages",
+            headers=platform_admin.headers,
+        )
+        assert msgs.status_code == 200, msgs.text
+        user_msgs = [m for m in msgs.json() if m["role"] == "user"]
+        assert user_msgs, "expected a user message"
+        bound = [
+            a for m in user_msgs for a in m.get("attachments", [])
+            if a["id"] == attachment_id
+        ]
+        assert bound, "attachment was not bound to the user message"
+
+
+# =============================================================================
 # Fixtures
 # =============================================================================
 

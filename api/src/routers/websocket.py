@@ -645,7 +645,7 @@ async def websocket_connect(
 
     # Track active chat tasks per conversation so they can be cancelled
     active_chat_tasks: dict[str, asyncio.Task] = {}
-    pending_messages: dict[str, tuple[str, str | None]] = {}  # conversation_id -> (message, local_id)
+    pending_messages: dict[str, tuple[str, str | None, list[str]]] = {}  # conversation_id -> (message, local_id, attachment_ids)
 
     # Per-connection state for policy-driven table subscriptions.
     # Populated by `_authorize_table_subscribe`; consulted by the dispatcher.
@@ -880,6 +880,7 @@ async def websocket_connect(
                 conversation_id = data.get("conversation_id")
                 message_text = data.get("message", "")
                 local_id = data.get("local_id")  # Client-generated ID for dedup
+                attachment_ids = data.get("attachment_ids") or []
 
                 if not conversation_id or not message_text:
                     await websocket.send_json({
@@ -902,11 +903,13 @@ async def websocket_connect(
                 # interleaved messages that break the Anthropic API contract.
                 existing_task = active_chat_tasks.get(conversation_id)
                 if existing_task and not existing_task.done():
-                    pending_messages[conversation_id] = (message_text, local_id)
+                    pending_messages[conversation_id] = (message_text, local_id, attachment_ids)
                     continue
 
                 # No running task — process immediately
-                def _start_chat_task(cid: str, msg: str, lid: str | None) -> asyncio.Task:
+                def _start_chat_task(
+                    cid: str, msg: str, lid: str | None, att_ids: list[str]
+                ) -> asyncio.Task:
                     t = asyncio.create_task(
                         _process_chat_message(
                             websocket=websocket,
@@ -914,6 +917,7 @@ async def websocket_connect(
                             conversation_id=cid,
                             message=msg,
                             local_id=lid,
+                            attachment_ids=att_ids,
                         )
                     )
                     active_chat_tasks[cid] = t
@@ -922,13 +926,13 @@ async def websocket_connect(
                         active_chat_tasks.pop(_cid, None)
                         queued = pending_messages.pop(_cid, None)
                         if queued:
-                            q_msg, q_lid = queued
-                            _start_chat_task(_cid, q_msg, q_lid)
+                            q_msg, q_lid, q_att = queued
+                            _start_chat_task(_cid, q_msg, q_lid, q_att)
 
                     t.add_done_callback(_on_task_done)
                     return t
 
-                _start_chat_task(conversation_id, message_text, local_id)
+                _start_chat_task(conversation_id, message_text, local_id, attachment_ids)
 
             elif data.get("type") == "chat_stop":
                 conversation_id = data.get("conversation_id")
@@ -1144,6 +1148,7 @@ async def _process_chat_message(
     conversation_id: str,
     message: str,
     local_id: str | None = None,
+    attachment_ids: list[str] | None = None,
 ) -> None:
     """
     Process a chat message and stream the response.
@@ -1226,6 +1231,7 @@ async def _process_chat_message(
                 stream=True,
                 local_id=local_id,
                 user=user,
+                attachment_ids=[UUID(a) for a in attachment_ids] if attachment_ids else None,
             ):
                 # Track partial content from deltas
                 if chunk.type == "delta" and chunk.content:

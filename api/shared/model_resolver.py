@@ -378,12 +378,27 @@ def check_message_compat(
     return reasons
 
 
+async def model_supports_vision(session: AsyncSession, model_id: str) -> bool:
+    """Return True if the given model accepts image input (vision).
+
+    Looks the model up in ``platform_models`` and reads the
+    ``supports_images_in`` capability flag. Unknown models are treated as
+    non-vision (conservative: text-only).
+    """
+    pm = await session.get(PlatformModel, model_id)
+    if pm is None:
+        return False
+    caps = pm.capabilities or {}
+    return bool(caps.get("supports_images_in"))
+
+
 __all__ = [
     "ModelResolutionContext",
     "ModelResolutionError",
     "ModelChoice",
     "resolve_model",
     "has_capabilities",
+    "model_supports_vision",
     "pick_compatible_from_set",
     "check_message_compat",
     "_PROVENANCE_ORDER",

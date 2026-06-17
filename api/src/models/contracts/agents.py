@@ -342,6 +342,43 @@ class ConversationSummary(BaseModel):
         return dt.isoformat()
 
 
+# ==================== ATTACHMENT MODELS ====================
+
+
+class AttachmentPublic(BaseModel):
+    """A file attached to a chat message."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    filename: str
+    content_type: str
+    size_bytes: int
+    has_extracted_text: bool = Field(
+        default=False,
+        description="True if server-side text was extracted (PDF/CSV/text). Images have none.",
+    )
+
+    @field_serializer("id")
+    def serialize_id(self, v: UUID) -> str:
+        return str(v)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_has_extracted_text(cls, data):
+        """Derive has_extracted_text from the ORM's extracted_text column."""
+        if not isinstance(data, dict) and hasattr(data, "extracted_text"):
+            try:
+                data.has_extracted_text = bool(data.extracted_text)
+            except (AttributeError, ValueError):
+                pass  # detached instance — DTO default (False) applies
+        return data
+
+
+class AttachmentUploadResponse(BaseModel):
+    """Response after uploading attachments to a conversation."""
+    attachments: list[AttachmentPublic] = Field(default_factory=list)
+
+
 # ==================== MESSAGE MODELS ====================
 
 
@@ -374,6 +411,7 @@ class MessagePublic(BaseModel):
     parent_message_id: UUID | None = None
     sibling_count: int = 1   # 1 = this message has no siblings
     sibling_index: int = 0   # 0-based index among siblings
+    attachments: list[AttachmentPublic] = Field(default_factory=list)
 
     @field_serializer("id", "conversation_id")
     def serialize_uuid(self, v: UUID) -> str:
@@ -395,6 +433,14 @@ class ChatRequest(BaseModel):
     """Request for sending a chat message."""
     message: str = Field(..., min_length=1, max_length=100000)
     stream: bool = Field(default=True, description="Whether to stream the response")
+    attachment_ids: list[UUID] = Field(
+        default_factory=list,
+        description=(
+            "IDs of attachments (previously uploaded to this conversation) to "
+            "bind to this user message. Each must belong to this conversation "
+            "and not already be bound to another message."
+        ),
+    )
 
 
 class ChatResponse(BaseModel):

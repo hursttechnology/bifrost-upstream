@@ -74,6 +74,7 @@ dependencies = [
     "PyYAML",
     "croniter",  # CRON expression parsing
     "defusedxml>=0.7.1",  # Safe XML/SVG parsing — strips scripts/event-handlers from uploads
+    "pypdf>=5.0.0",  # Server-side PDF text extraction for chat attachments (M4)
 
     # =========================================================================
     # Code Transformation

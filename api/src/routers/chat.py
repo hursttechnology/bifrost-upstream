@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Literal, cast
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, File, HTTPException, Response, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
@@ -22,6 +22,8 @@ from sqlalchemy.orm import selectinload
 from src.core.auth import CurrentActiveUser
 from src.core.db_deps import DbSession
 from src.models.contracts.agents import (
+    AttachmentPublic,
+    AttachmentUploadResponse,
     ChatRequest,
     ChatResponse,
     ConversationCreate,
@@ -32,8 +34,13 @@ from src.models.contracts.agents import (
     SwitchBranchRequest,
     ToolCall,
 )
-from src.models.orm import Agent, Conversation, Message, Workspace
+from src.models.orm import Agent, Conversation, Message, MessageAttachment, Workspace
 from src.services.agent_executor import AgentExecutor
+from src.services.attachments import (
+    MAX_FILES_PER_MESSAGE,
+    AttachmentError,
+    AttachmentService,
+)
 from src.services.workspace_service import can_access_workspace
 
 logger = logging.getLogger(__name__)
@@ -504,6 +511,68 @@ async def delete_conversation(
 
 
 # =============================================================================
+# Attachments
+# =============================================================================
+
+
+@router.post("/conversations/{conversation_id}/attachments")
+async def upload_attachments(
+    conversation_id: UUID,
+    db: DbSession,
+    user: CurrentActiveUser,
+    files: list[UploadFile] = File(..., description="Files to attach (images, PDFs, CSVs, text)"),
+) -> AttachmentUploadResponse:
+    """Upload one or more files to a conversation.
+
+    Files are validated, stored to S3, and (for PDF/CSV/text) text-extracted.
+    They are created unbound; they bind to a user message when the next chat
+    message referencing their IDs is sent.
+    """
+    # Ownership check — conversations are owned by their creating user.
+    result = await db.execute(
+        select(Conversation)
+        .where(Conversation.id == conversation_id)
+        .where(Conversation.user_id == user.user_id)
+    )
+    conversation = result.scalar_one_or_none()
+    if not conversation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Conversation {conversation_id} not found",
+        )
+
+    if len(files) > MAX_FILES_PER_MESSAGE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Too many files. Maximum is {MAX_FILES_PER_MESSAGE} per message.",
+        )
+
+    service = AttachmentService(db)
+    stored: list[MessageAttachment] = []
+    try:
+        for f in files:
+            content = await f.read()
+            attachment = await service.store_upload(
+                conversation_id=conversation_id,
+                filename=f.filename or "attachment",
+                content_type=f.content_type or "application/octet-stream",
+                content=content,
+            )
+            stored.append(attachment)
+    except AttachmentError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+    await db.commit()
+
+    return AttachmentUploadResponse(
+        attachments=[AttachmentPublic.model_validate(a) for a in stored]
+    )
+
+
+# =============================================================================
 # Messages
 # =============================================================================
 
@@ -559,12 +628,31 @@ async def get_messages(
 
     rows = (await db.execute(stmt)).all()
 
+    # Batch-load attachments for the returned messages (avoids N+1).
+    message_ids = [m.id for m, _sc, _si in rows]
+    attachments_by_message: dict[UUID, list[MessageAttachment]] = {}
+    if message_ids:
+        att_rows = (
+            await db.execute(
+                select(MessageAttachment)
+                .where(MessageAttachment.message_id.in_(message_ids))
+                .order_by(MessageAttachment.created_at)
+            )
+        ).scalars().all()
+        for att in att_rows:
+            if att.message_id is not None:
+                attachments_by_message.setdefault(att.message_id, []).append(att)
+
     return [
         MessagePublic(
             id=m.id,
             conversation_id=m.conversation_id,
             role=m.role,
             content=m.content,
+            attachments=[
+                AttachmentPublic.model_validate(a)
+                for a in attachments_by_message.get(m.id, [])
+            ],
             tool_calls=[
                 ToolCall(
                     id=tc["id"],
@@ -709,6 +797,7 @@ async def send_message(
         user_message=request.message,
         stream=False,
         user=user,
+        attachment_ids=request.attachment_ids or None,
     ):
         if chunk.type == "delta" and chunk.content:
             final_content += chunk.content

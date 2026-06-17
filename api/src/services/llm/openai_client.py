@@ -222,7 +222,23 @@ class OpenAIClient(BaseLLMClient):
                 result.append({"role": "system", "content": msg.content or ""})
 
             elif msg.role == "user":
-                result.append({"role": "user", "content": msg.content or ""})
+                if msg.images:
+                    import base64
+
+                    parts: list[dict[str, Any]] = []
+                    if msg.content:
+                        parts.append({"type": "text", "text": msg.content})
+                    for img in msg.images:
+                        b64 = base64.b64encode(img.data).decode("ascii")
+                        parts.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{img.media_type};base64,{b64}"
+                            },
+                        })
+                    result.append({"role": "user", "content": parts})  # type: ignore[arg-type]
+                else:
+                    result.append({"role": "user", "content": msg.content or ""})
 
             elif msg.role == "assistant":
                 assistant_msg: dict[str, Any] = {"role": "assistant"}

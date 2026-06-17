@@ -377,7 +377,7 @@ export function ChatWindow({
 	}, [messages, systemEvents, pendingQuestion, isAtBottom]);
 
 	// Handle send message
-	const handleSendMessage = (message: string) => {
+	const handleSendMessage = (message: string, attachmentIds?: string[]) => {
 		if (!conversationId) {
 			createConversation.mutate(
 				{
@@ -388,14 +388,14 @@ export function ChatWindow({
 						setActiveConversation(data.id);
 						setActiveAgent(data.agent_id ?? null);
 						navigate(`/chat/${data.id}`);
-						sendMessage(message, data.id);
+						sendMessage(message, data.id, attachmentIds);
 					},
 				},
 			);
 			return;
 		}
 
-		sendMessage(message);
+		sendMessage(message, undefined, attachmentIds);
 	};
 
 	// Empty state
@@ -414,6 +414,7 @@ export function ChatWindow({
 				</div>
 				<ChatInput
 					onSend={handleSendMessage}
+					conversationId={conversationId}
 					disabled={createConversation.isPending}
 					placeholder="Send a message..."
 				/>
@@ -438,6 +439,7 @@ export function ChatWindow({
 				</div>
 				<ChatInput
 					onSend={handleSendMessage}
+					conversationId={conversationId}
 					disabled
 					selectedModel={currentModel}
 					onSelectModel={handleSelectModel}
@@ -466,6 +468,7 @@ export function ChatWindow({
 				</div>
 				<ChatInput
 					onSend={handleSendMessage}
+					conversationId={conversationId}
 					placeholder="Send a message..."
 					selectedModel={currentModel}
 					onSelectModel={handleSelectModel}
@@ -598,6 +601,7 @@ export function ChatWindow({
 			{/* Input Area */}
 			<ChatInput
 				onSend={handleSendMessage}
+					conversationId={conversationId}
 				isLoading={isStreaming}
 				onStop={stopStreaming}
 				placeholder={

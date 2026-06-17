@@ -60,7 +60,7 @@ describe("ChatInput — send behavior", () => {
 		// Press Enter to submit.
 		await user.type(textarea, "{Enter}");
 
-		expect(onSend).toHaveBeenCalledWith("hello world");
+		expect(onSend).toHaveBeenCalledWith("hello world", undefined);
 		// Textarea is cleared post-send.
 		expect(textarea.value).toBe("");
 	});
@@ -139,7 +139,7 @@ describe("ChatInput — @ mentions", () => {
 		await user.click(textarea);
 		await user.keyboard("{Enter}");
 
-		expect(onSend).toHaveBeenCalledWith("@[SupportBot]");
+		expect(onSend).toHaveBeenCalledWith("@[SupportBot]", undefined);
 	});
 });
 

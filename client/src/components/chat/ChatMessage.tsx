@@ -6,9 +6,10 @@
  * Supports full markdown rendering for AI responses.
  */
 
-import { Bot } from "lucide-react";
+import { Bot, FileImage, FileSpreadsheet, FileText } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { components } from "@/lib/v1";
+import { isImageAttachment } from "@/services/chatAttachments";
 import {
 	COST_TIER_GLYPH,
 	COST_TIER_LABEL,
@@ -27,6 +28,47 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 
 type MessagePublic = components["schemas"]["MessagePublic"];
+type AttachmentPublic = components["schemas"]["AttachmentPublic"];
+
+function attachmentIcon(contentType: string) {
+	if (isImageAttachment(contentType)) return FileImage;
+	if (contentType === "text/csv" || contentType === "application/csv")
+		return FileSpreadsheet;
+	return FileText;
+}
+
+/** Renders the chips for a message's bound attachments. */
+function MessageAttachments({
+	attachments,
+	tone,
+}: {
+	attachments: AttachmentPublic[];
+	tone: "user" | "assistant";
+}) {
+	if (attachments.length === 0) return null;
+	return (
+		<div className="flex flex-wrap gap-1.5 mb-2">
+			{attachments.map((att) => {
+				const Icon = attachmentIcon(att.content_type);
+				return (
+					<span
+						key={att.id}
+						className={cn(
+							"inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs",
+							tone === "user"
+								? "bg-black/20 text-primary-foreground"
+								: "bg-muted text-foreground",
+						)}
+						title={att.filename}
+					>
+						<Icon className="h-3.5 w-3.5 shrink-0 opacity-80" />
+						<span className="max-w-[180px] truncate">{att.filename}</span>
+					</span>
+				);
+			})}
+		</div>
+	);
+}
 
 /**
  * Detect if text is a progress/status update rather than the final result.
@@ -132,6 +174,10 @@ export function ChatMessage({
 		return (
 			<div className="flex justify-end py-2 px-4">
 				<div className="max-w-[80%] bg-primary text-primary-foreground rounded-2xl px-4 py-2.5 overflow-x-auto break-words">
+					<MessageAttachments
+						attachments={message.attachments ?? []}
+						tone="user"
+					/>
 					<div className="prose prose-invert prose-sm max-w-none prose-p:my-1 prose-p:leading-relaxed prose-p:text-primary-foreground prose-headings:text-primary-foreground prose-strong:text-primary-foreground prose-code:text-primary-foreground prose-pre:my-2 prose-pre:p-0 prose-pre:bg-transparent">
 						<ReactMarkdown
 							remarkPlugins={[remarkGfm]}

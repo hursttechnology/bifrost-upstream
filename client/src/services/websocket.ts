@@ -1463,7 +1463,12 @@ class WebSocketService {
 	/**
 	 * Send a chat message to a conversation
 	 */
-	sendChatMessage(conversationId: string, message: string, localId?: string): boolean {
+	sendChatMessage(
+		conversationId: string,
+		message: string,
+		localId?: string,
+		attachmentIds?: string[],
+	): boolean {
 		if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
 			return false;
 		}
@@ -1474,6 +1479,7 @@ class WebSocketService {
 				conversation_id: conversationId,
 				message,
 				local_id: localId,
+				attachment_ids: attachmentIds ?? [],
 			}),
 		);
 		return true;

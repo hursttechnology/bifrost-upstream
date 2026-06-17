@@ -11825,6 +11825,11 @@ export interface components {
              * @default true
              */
             stream: boolean;
+            /**
+             * Attachment Ids
+             * @description IDs of attachments (previously uploaded to this conversation) to bind to this user message.
+             */
+            attachment_ids?: string[];
         };
         /**
          * ChatResponse
@@ -17709,6 +17714,35 @@ export interface components {
              * @default 0
              */
             sibling_index: number;
+            /** Attachments */
+            attachments?: components["schemas"]["AttachmentPublic"][];
+        };
+        /**
+         * AttachmentPublic
+         * @description A file attached to a chat message.
+         */
+        AttachmentPublic: {
+            /** Id */
+            id: string;
+            /** Filename */
+            filename: string;
+            /** Content Type */
+            content_type: string;
+            /** Size Bytes */
+            size_bytes: number;
+            /**
+             * Has Extracted Text
+             * @default false
+             */
+            has_extracted_text: boolean;
+        };
+        /**
+         * AttachmentUploadResponse
+         * @description Response after uploading attachments to a conversation.
+         */
+        AttachmentUploadResponse: {
+            /** Attachments */
+            attachments?: components["schemas"]["AttachmentPublic"][];
         };
         /**
          * MessageRole

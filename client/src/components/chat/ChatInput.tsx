@@ -9,16 +9,27 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import {
 	ArrowUp,
 	Bot,
+	FileImage,
+	FileSpreadsheet,
+	FileText,
 	Loader2,
 	Paperclip,
 	Plus,
 	Square,
 	X,
 } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { MentionPicker } from "./MentionPicker";
 import { ModelPicker } from "./ModelPicker";
+import {
+	MAX_ATTACHMENTS_PER_MESSAGE,
+	isImageAttachment,
+	uploadChatAttachments,
+	validateAttachment,
+	type AttachmentPublic,
+} from "@/services/chatAttachments";
 import type { components } from "@/lib/v1";
 
 type AgentSummary = components["schemas"]["AgentSummary"];
@@ -29,11 +40,14 @@ interface MentionChip {
 }
 
 interface ChatInputProps {
-	onSend: (message: string) => void;
+	onSend: (message: string, attachmentIds?: string[]) => void;
 	disabled?: boolean;
 	isLoading?: boolean;
 	placeholder?: string;
 	onStop?: () => void;
+	/** Conversation to upload attachments to. When absent (new chat before
+	 *  the conversation exists) the attach affordance is disabled. */
+	conversationId?: string;
 	/** Currently-selected model for this conversation. The picker uses
 	 *  the resolved default when this is null. */
 	selectedModel?: string | null;
@@ -43,12 +57,20 @@ interface ChatInputProps {
 	onSelectModel?: (modelId: string) => void;
 }
 
+function attachmentIcon(contentType: string) {
+	if (isImageAttachment(contentType)) return FileImage;
+	if (contentType === "text/csv" || contentType === "application/csv")
+		return FileSpreadsheet;
+	return FileText;
+}
+
 export function ChatInput({
 	onSend,
 	disabled = false,
 	isLoading = false,
 	placeholder = "Reply...",
 	onStop,
+	conversationId,
 	selectedModel,
 	onSelectModel,
 }: ChatInputProps) {
@@ -56,6 +78,12 @@ export function ChatInput({
 	const [mentions, setMentions] = useState<MentionChip[]>([]);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const containerRef = useRef<HTMLDivElement>(null);
+	const fileInputRef = useRef<HTMLInputElement>(null);
+
+	// Attachment state
+	const [attachments, setAttachments] = useState<AttachmentPublic[]>([]);
+	const [isUploading, setIsUploading] = useState(false);
+	const [isDragging, setIsDragging] = useState(false);
 
 	// Mention picker state
 	const [mentionOpen, setMentionOpen] = useState(false);
@@ -63,10 +91,47 @@ export function ChatInput({
 	const [mentionPosition, setMentionPosition] = useState({ x: 0, y: 0 });
 	const [mentionStart, setMentionStart] = useState<number | null>(null);
 
+	const attachEnabled = !!conversationId && !disabled;
+
+	const uploadFiles = useCallback(
+		async (files: File[]) => {
+			if (!conversationId || files.length === 0) return;
+			if (attachments.length + files.length > MAX_ATTACHMENTS_PER_MESSAGE) {
+				toast.error(
+					`You can attach at most ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`,
+				);
+				return;
+			}
+			for (const f of files) {
+				const err = validateAttachment(f);
+				if (err) {
+					toast.error(err);
+					return;
+				}
+			}
+			setIsUploading(true);
+			try {
+				const res = await uploadChatAttachments(conversationId, files);
+				setAttachments((prev) => [...prev, ...res.attachments]);
+			} catch (e) {
+				toast.error(
+					e instanceof Error ? e.message : "Failed to upload attachment",
+				);
+			} finally {
+				setIsUploading(false);
+			}
+		},
+		[conversationId, attachments.length],
+	);
+
+	const handleRemoveAttachment = useCallback((id: string) => {
+		setAttachments((prev) => prev.filter((a) => a.id !== id));
+	}, []);
+
 	const handleSend = useCallback(() => {
 		const trimmedMessage = message.trim();
 		if (!trimmedMessage && mentions.length === 0) return;
-		if (disabled || isLoading) return;
+		if (disabled || isLoading || isUploading) return;
 
 		// Build final message with mentions prepended
 		const mentionPrefixes = mentions.map((m) => `@[${m.name}]`).join(" ");
@@ -74,15 +139,17 @@ export function ChatInput({
 			? `${mentionPrefixes} ${trimmedMessage}`.trim()
 			: trimmedMessage;
 
-		onSend(finalMessage);
+		const attachmentIds = attachments.map((a) => a.id);
+		onSend(finalMessage, attachmentIds.length > 0 ? attachmentIds : undefined);
 		setMessage("");
 		setMentions([]);
+		setAttachments([]);
 
 		// Reset textarea height
 		if (textareaRef.current) {
 			textareaRef.current.style.height = "auto";
 		}
-	}, [message, mentions, disabled, isLoading, onSend]);
+	}, [message, mentions, attachments, disabled, isLoading, isUploading, onSend]);
 
 	const handleKeyDown = useCallback(
 		(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -104,6 +171,62 @@ export function ChatInput({
 		},
 		[handleSend, mentionOpen],
 	);
+
+	// Paste an image from the clipboard → upload as an attachment (§16.8).
+	const handlePaste = useCallback(
+		(e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+			if (!attachEnabled) return;
+			const imageFiles: File[] = [];
+			for (const item of Array.from(e.clipboardData.items)) {
+				if (item.kind === "file" && item.type.startsWith("image/")) {
+					const file = item.getAsFile();
+					if (file) {
+						const ext = file.type.split("/")[1] || "png";
+						const stamp = new Date()
+							.toISOString()
+							.slice(0, 16)
+							.replace(/[-:T]/g, "")
+							.replace(/(\d{8})(\d{4})/, "$1-$2");
+						imageFiles.push(
+							new File([file], `screenshot-${stamp}.${ext}`, {
+								type: file.type,
+							}),
+						);
+					}
+				}
+			}
+			if (imageFiles.length > 0) {
+				e.preventDefault();
+				void uploadFiles(imageFiles);
+			}
+		},
+		[attachEnabled, uploadFiles],
+	);
+
+	const handleDrop = useCallback(
+		(e: React.DragEvent) => {
+			e.preventDefault();
+			setIsDragging(false);
+			if (!attachEnabled) return;
+			const files = Array.from(e.dataTransfer.files);
+			if (files.length > 0) void uploadFiles(files);
+		},
+		[attachEnabled, uploadFiles],
+	);
+
+	const handleDragOver = useCallback(
+		(e: React.DragEvent) => {
+			if (!attachEnabled) return;
+			e.preventDefault();
+			setIsDragging(true);
+		},
+		[attachEnabled],
+	);
+
+	const handleDragLeave = useCallback((e: React.DragEvent) => {
+		e.preventDefault();
+		setIsDragging(false);
+	}, []);
 
 	// Detect @ mentions while typing
 	const handleInputChange = useCallback(
@@ -206,7 +329,8 @@ export function ChatInput({
 	const canSend =
 		(message.trim().length > 0 || mentions.length > 0) &&
 		!disabled &&
-		!isLoading;
+		!isLoading &&
+		!isUploading;
 
 	return (
 		<div className="p-4 pt-2">
@@ -214,12 +338,25 @@ export function ChatInput({
 				{/* Floating input container */}
 				<div
 					ref={containerRef}
+					onDrop={handleDrop}
+					onDragOver={handleDragOver}
+					onDragLeave={handleDragLeave}
 					className={cn(
 						"relative rounded-2xl bg-muted/50 shadow-lg ring-1 ring-foreground/5 dark:ring-foreground/10",
 						"transition-all duration-200",
 						"focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 focus-within:ring-offset-background",
+						isDragging && "ring-2 ring-primary",
 					)}
 				>
+					{/* Drag-and-drop overlay (§16.8) */}
+					{isDragging && (
+						<div className="absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-primary/10 backdrop-blur-sm pointer-events-none">
+							<div className="flex items-center gap-2 text-sm font-medium text-primary">
+								<Paperclip className="h-4 w-4" />
+								Drop files to attach
+							</div>
+						</div>
+					)}
 					{/* Mention picker */}
 					<MentionPicker
 						open={mentionOpen}
@@ -257,12 +394,42 @@ export function ChatInput({
 								))}
 							</div>
 						)}
+						{/* Attachment chips (§16.8) */}
+						{attachments.length > 0 && (
+							<div className="flex flex-wrap gap-1.5 mb-2">
+								{attachments.map((att) => {
+									const Icon = attachmentIcon(att.content_type);
+									return (
+										<span
+											key={att.id}
+											className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-md bg-muted text-foreground text-xs"
+										>
+											<Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+											<span className="max-w-[160px] truncate">
+												{att.filename}
+											</span>
+											<button
+												type="button"
+												onClick={() =>
+													handleRemoveAttachment(att.id)
+												}
+												className="ml-0.5 p-0.5 rounded-full hover:bg-foreground/10 transition-colors"
+												aria-label={`Remove ${att.filename}`}
+											>
+												<X className="h-3 w-3" />
+											</button>
+										</span>
+									);
+								})}
+							</div>
+						)}
 						<textarea
 							ref={textareaRef}
 							aria-label="Chat input"
 							value={message}
 							onChange={handleInputChange}
 							onKeyDown={handleKeyDown}
+							onPaste={handlePaste}
 							placeholder={
 								mentions.length > 0
 									? "Add a message..."
@@ -293,15 +460,42 @@ export function ChatInput({
 							>
 								<Plus className="h-5 w-5" />
 							</Button>
+							<input
+								ref={fileInputRef}
+								type="file"
+								multiple
+								accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/csv,text/plain,text/markdown,application/json,.txt,.md,.json,.yaml,.yml,.csv"
+								className="hidden"
+								onChange={(e) => {
+									const files = Array.from(e.target.files ?? []);
+									if (files.length > 0) void uploadFiles(files);
+									e.target.value = "";
+								}}
+							/>
 							<Button
 								type="button"
 								variant="ghost"
 								size="icon"
-								className="h-8 w-8 rounded-full text-muted-foreground/50 cursor-not-allowed"
-								disabled
-								title="Coming soon"
+								onClick={() => fileInputRef.current?.click()}
+								className={cn(
+									"h-8 w-8 rounded-full",
+									attachEnabled
+										? "text-muted-foreground hover:text-foreground"
+										: "text-muted-foreground/50 cursor-not-allowed",
+								)}
+								disabled={!attachEnabled || isUploading}
+								title={
+									attachEnabled
+										? "Attach files"
+										: "Start a chat to attach files"
+								}
+								aria-label="Attach files"
 							>
-								<Paperclip className="h-4 w-4" />
+								{isUploading ? (
+									<Loader2 className="h-4 w-4 animate-spin" />
+								) : (
+									<Paperclip className="h-4 w-4" />
+								)}
 							</Button>
 							{onSelectModel && (
 								<ModelPicker

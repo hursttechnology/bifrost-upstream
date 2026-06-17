@@ -29,7 +29,11 @@ export interface UseChatStreamOptions {
 }
 
 export interface UseChatStreamReturn {
-	sendMessage: (message: string, conversationIdOverride?: string) => void;
+	sendMessage: (
+		message: string,
+		conversationIdOverride?: string,
+		attachmentIds?: string[],
+	) => void;
 	isConnected: boolean;
 	isStreaming: boolean;
 	// AskUserQuestion support
@@ -416,7 +420,11 @@ export function useChatStream({
 
 	// Send message via WebSocket
 	const sendMessage = useCallback(
-		async (message: string, conversationIdOverride?: string) => {
+		async (
+			message: string,
+			conversationIdOverride?: string,
+			attachmentIds?: string[],
+		) => {
 			const targetConversationId = conversationIdOverride ?? conversationId;
 			if (!targetConversationId) {
 				toast.error("No conversation selected");
@@ -455,6 +463,7 @@ export function useChatStream({
 				targetConversationId,
 				message,
 				userMessageId,
+				attachmentIds,
 			);
 			if (!sent) {
 				try {
@@ -463,6 +472,7 @@ export function useChatStream({
 						targetConversationId,
 						message,
 						userMessageId,
+						attachmentIds,
 					);
 				} catch (error) {
 					console.error(

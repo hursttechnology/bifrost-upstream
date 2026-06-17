@@ -105,7 +105,7 @@ Two new **invisible capabilities** hook into `resolve_agent_tools()` (`api/src/s
 - **`trusted`** — scripts run through the **existing Bifrost execution engine** with `ExecutionContext`, SDK access, logs, audit, timeout, same caller/org permission model as workflow code. (NOT the sandbox — trusted == full workflow trust.)
 - **`external`** — future: a configured external runner (Azure Functions / Cloud Run / Lambda / local Docker / Firecracker) gets script text + input JSON, runs with no Bifrost credentials, returns stdout/stderr/result. **Protocol design only** unless explicitly prioritized; do not hard-code Azure as the product surface.
 
-**We do NOT promise an OSS built-in sandbox.** Strong sandboxing is the separate Code Execution sub-project (bwrap); see B below. A bundle script that needs untrusted isolation runs in **`sandbox-*` runtime** once Code Execution lands — at which point `execute_script` gains a `runtime` selector (`workflow` = trusted today; `sandbox-python`/`sandbox-node` = isolated). Until then, `trusted` and `external` are the honest options.
+**We do NOT promise an OSS built-in sandbox.** In-cluster bwrap was explored and **rejected** (not CI-testable, needs `CAP_SYS_ADMIN`, doesn't transfer to a hardened multi-tenant deployment) — see the decision record `2026-06-17-code-execution-decision.md`. A bundle script that needs untrusted isolation runs via the **`external` runner** (Anthropic Managed Agents as the first reference runner; a hosted "call it over the API" runner, not a kernel sandbox we operate) — protocol-only until actually built. The honest, shipping options are `disabled` and `trusted`; `external` is the untrusted escape hatch when needed.
 
 ### A.6 Import/export boundary (carried from 2026-06-13)
 
@@ -124,13 +124,17 @@ Net: **delete sub-project 3 as separate work.** Its value is delivered by A.1–
 
 ---
 
-## Part B — Code Execution stays its own sub-project (the real sandbox)
+## Part B — Untrusted execution: `external` runner, NOT an in-house sandbox
 
-This design does **not** absorb Code Execution. The bwrap sandbox (program spec §3, findings doc `2026-04-27-chat-v2-sandbox-bwrap-findings.md`) remains sub-project 2 and is the substrate for:
-- Untrusted skill scripts (`script_execution` running in `sandbox-*` runtime).
-- Server-side **file generation** for artifacts (Part C) — `pandoc`/`soffice`/`pdftoppm`/`npm`-backed doc generation runs in the sandbox, never the trusted pool.
+**Decision (2026-06-17, `2026-06-17-code-execution-decision.md`): the in-house bwrap "Code Execution" sub-project is rejected.** It is not reasonably CI-testable, needs `CAP_SYS_ADMIN` (fighting the worker hardening), and doesn't transfer to a hardened multi-tenant deployment. Anthropic's transferable answer is a **hosted** runner, not bwrap-in-your-cluster.
 
-The relationship: **Part A gives skills a place to declare scripts; Part B gives untrusted scripts a safe runtime; Part C gives their file output a render contract.** Three layers, one story.
+So untrusted execution is the **`external` runner** (A.5): a configured runner (Managed Agents first) gets script text + input JSON, runs with zero Bifrost credentials, returns stdout/stderr/result. Protocol-only until built.
+
+What this means for the layers:
+- **Untrusted skill scripts** → `external` runner when it exists; until then, `trusted` (existing engine) or `disabled`.
+- **Server-side file generation for artifacts** (Part C) → in `trusted` mode runs in the existing engine (the org accepts that trust); untrusted generation would go through `external`. **File-first artifact v1 needs neither** — a trusted workflow tool can produce files today.
+
+The relationship: **Part A gives skills a place to declare scripts; `trusted` runs them in the existing engine now; `external` is the untrusted path when needed; Part C gives their file output a render contract.**
 
 ---
 
@@ -222,7 +226,7 @@ Sub-project 5 (Web Search) as a bespoke provider-abstraction subsystem: **gone**
 | Original sub-project | Fate |
 |---|---|
 | (1) Chat UX | Unchanged. ~70% built; M4/M5/M6/M7 gaps in flight separately. |
-| (2) Code Execution | **Unchanged** — still its own sub-project (the bwrap sandbox). It is the runtime substrate for untrusted skill scripts (A.5) and artifact file generation (C). |
+| (2) Code Execution | **Rejected as bwrap** (`2026-06-17-code-execution-decision.md`). Untrusted execution becomes the `external` runner (Managed Agents), protocol-only until needed. `trusted` (existing engine) is the shipping model. |
 | (3) Skills | **Superseded by Part A.** Agents are skills; no separate registry/loader/scoping to build. |
 | (4) Artifacts | **Reframed by Part C.** A tool-return contract (file-first + inert previews), not a three-tier subsystem. Executable rendering deferred. |
 | (5) Web Search | **Reframed by Part D.** Default-injected tools + community bundles, not a provider-abstraction sub-project. |
@@ -244,7 +248,7 @@ This turns "four more subsystems" into "one capability/return contract + Code Ex
 ### Sequencing
 - **(1) bundle metadata + (2) read_skill_asset** can start now — pure agent/manifest work, no sandbox dependency. Best branched from the Solutions-merged main so `bundle_path` lines up with `repo_subpath`/SolutionStorage.
 - **Artifact contract (5)** — design now; the **file-first inert path can ship against trusted workflow tools today** (no Code Execution dependency), reusing M4 storage. Sandbox-backed generation waits on (2).
-- **`execute_script` sandbox runtime, untrusted skill scripts, sandbox-generated binary artifacts** — gated on Code Execution (2).
+- **`execute_script` untrusted runtime, untrusted skill scripts, untrusted binary artifacts** — gated on the `external` runner being built (NOT bwrap; see decision record).
 - **`external` runner** — protocol-only until explicitly prioritized.
 
 ## Open questions
@@ -255,4 +259,4 @@ This turns "four more subsystems" into "one capability/return contract + Code Ex
 
 ## Picking this back up
 
-Read Part A first — it's the spine (agents are skills, no separate Skills build). Parts C and D are the "capabilities are tools" corollaries that delete sub-projects 4 and 5 as separate work. Part B (Code Execution) is untouched and remains the sandbox sub-project. The 2026-06-13 brainstorm's MVP honesty still holds: skill-compatible bundles + `read_skill_asset` + `script_execution: disabled|trusted` are the core; `external` and sandbox-runtime scripts are later.
+Read Part A first — it's the spine (agents are skills, no separate Skills build). Parts C and D are the "capabilities are tools" corollaries that delete sub-projects 4 and 5 as separate work. Part B records that in-house bwrap is **rejected** — untrusted execution is the `external` runner (Managed Agents) when needed; see `2026-06-17-code-execution-decision.md`. The 2026-06-13 brainstorm's MVP honesty still holds: skill-compatible bundles + `read_skill_asset` + `script_execution: disabled|trusted` are the core; `external` is later, and there is no bwrap.

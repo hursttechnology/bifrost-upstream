@@ -494,6 +494,33 @@ class AgentSwitch(BaseModel):
     reason: str = Field(default="", description="Reason for the switch (e.g., '@mention', 'routed')")
 
 
+class DelegationInfo(BaseModel):
+    """Multi-agent delegation event during a single chat turn (M6).
+
+    Carried by ``delegation_started`` (response unset) and
+    ``delegation_complete`` (response/error populated) chunks. The primary
+    agent calls a ``delegate_to_<agent>`` tool mid-turn; the delegated agent
+    runs and its result returns as a tool result the primary continues from.
+    The UI renders a "✓ consulted <agent>" badge with the exchange in an
+    expandable detail.
+    """
+    tool_call_id: str = Field(..., description="ID of the delegate_to_* tool call")
+    agent_id: str | None = Field(default=None, description="Delegated agent UUID")
+    agent_name: str = Field(..., description="Delegated agent display name")
+    task: str = Field(default="", description="Task/question delegated to the agent")
+    response: str | None = Field(
+        default=None,
+        description="Delegated agent's response (delegation_complete only)",
+    )
+    error: str | None = Field(
+        default=None,
+        description="Error if the delegation failed (delegation_complete only)",
+    )
+    duration_ms: int | None = Field(
+        default=None, description="Delegation duration (delegation_complete only)"
+    )
+
+
 class ContextWarning(BaseModel):
     """Context window warning/compaction event.
 
@@ -547,6 +574,12 @@ class ChatStreamChunk(BaseModel):
         # context_warning chunk now means "compaction approaching."
         "compaction_started",
         "compaction_complete",
+        # M6 multi-agent delegation (§13): delegation_started fires when the
+        # primary agent calls a delegate_to_* tool mid-turn; delegation_complete
+        # carries the delegated agent's response so the UI can render the
+        # "✓ consulted <agent>" badge with an expandable detail.
+        "delegation_started",
+        "delegation_complete",
         "title_update",
         "done",
         "error",
@@ -564,6 +597,9 @@ class ChatStreamChunk(BaseModel):
     # Agent switch and context warning
     agent_switch: AgentSwitch | None = None
     context_warning: ContextWarning | None = None
+
+    # M6 multi-agent delegation (delegation_started / delegation_complete)
+    delegation: DelegationInfo | None = None
 
     # Message IDs
     message_id: str | None = None

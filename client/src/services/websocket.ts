@@ -319,7 +319,9 @@ export interface ChatStreamChunk {
 		| "todo_update"
 		| "context_warning"
 		| "compaction_started"
-		| "compaction_complete";
+		| "compaction_complete"
+		| "delegation_started"
+		| "delegation_complete";
 	conversation_id?: string;
 	content?: string | null;
 	tool_call?: ChatToolCall | null;
@@ -354,6 +356,19 @@ export interface ChatStreamChunk {
 		message: string;
 		turns_compacted?: number;
 	} | null;
+	// M6 multi-agent delegation. Carried by delegation_started (response unset)
+	// and delegation_complete (response/error populated) chunks.
+	delegation?: ChatDelegationInfo | null;
+}
+
+export interface ChatDelegationInfo {
+	tool_call_id: string;
+	agent_id?: string | null;
+	agent_name: string;
+	task?: string;
+	response?: string | null;
+	error?: string | null;
+	duration_ms?: number | null;
 }
 
 // Pool/worker message types for real-time diagnostics
@@ -946,6 +961,8 @@ class WebSocketService {
 			case "context_warning":
 			case "compaction_started":
 			case "compaction_complete":
+			case "delegation_started":
+			case "delegation_complete":
 				this.dispatchChatStreamChunk(message as ChatStreamChunk);
 				break;
 

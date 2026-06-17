@@ -30,6 +30,7 @@ from src.models.contracts.agents import (
     AgentSwitch,
     ChatStreamChunk,
     ContextWarning,
+    DelegationInfo,
     ToolCall,
     ToolProgress,
     ToolResult,
@@ -631,6 +632,27 @@ IMPORTANT: When the user's request can be fulfilled using one of your tools, you
                             ),
                         )
 
+                    # M6: multi-agent delegation within a single turn. When the
+                    # primary agent calls a delegate_to_* tool, surface a
+                    # delegation_started chunk before the sub-agent runs so the
+                    # UI can render the "consulting <agent>" affordance.
+                    delegated_agent = (
+                        find_delegated_agent(agent, tc.name)
+                        if agent and tc.name.startswith("delegate_to_")
+                        else None
+                    )
+                    if stream and delegated_agent is not None:
+                        yield ChatStreamChunk(
+                            type="delegation_started",
+                            message_id=str(tool_call_msg.id),
+                            delegation=DelegationInfo(
+                                tool_call_id=tc.id,
+                                agent_id=str(delegated_agent.id),
+                                agent_name=delegated_agent.name,
+                                task=str((tc.arguments or {}).get("task", "")),
+                            ),
+                        )
+
                     # Execute the tool with pre-generated execution_id
                     tool_result = await self._execute_tool(
                         tc,
@@ -653,6 +675,28 @@ IMPORTANT: When the user's request can be fulfilled using one of your tools, you
                             type="tool_result",
                             tool_result=tool_result,
                             message_id=str(tool_call_msg.id),
+                        )
+
+                    # M6: pair the delegation_started with a delegation_complete
+                    # carrying the delegated agent's response/error so the badge
+                    # can flip to "✓ consulted <agent>" with expandable detail.
+                    if stream and delegated_agent is not None:
+                        response_text: str | None = None
+                        if isinstance(tool_result.result, dict):
+                            resp = tool_result.result.get("response")
+                            response_text = str(resp) if resp is not None else None
+                        yield ChatStreamChunk(
+                            type="delegation_complete",
+                            message_id=str(tool_call_msg.id),
+                            delegation=DelegationInfo(
+                                tool_call_id=tc.id,
+                                agent_id=str(delegated_agent.id),
+                                agent_name=delegated_agent.name,
+                                task=str((tc.arguments or {}).get("task", "")),
+                                response=response_text,
+                                error=tool_result.error,
+                                duration_ms=tool_result.duration_ms,
+                            ),
                         )
 
                     # Still save TOOL message for Anthropic API compatibility (history reconstruction)

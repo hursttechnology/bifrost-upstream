@@ -4,6 +4,7 @@
  */
 
 import type { components } from "@/lib/v1";
+import type { ChatDelegationInfo } from "@/services/websocket";
 
 type MessagePublic = components["schemas"]["MessagePublic"];
 
@@ -19,6 +20,10 @@ export interface UnifiedMessage extends MessagePublic {
   tool_state?: "running" | "completed" | "error";
   tool_result?: unknown;
   tool_input?: Record<string, unknown>;
+  // M6 multi-agent delegation: set on a delegate_to_* tool_call message from
+  // delegation_started / delegation_complete chunks so the timeline can render
+  // the "✓ consulted <agent>" badge with an expandable detail.
+  delegation?: ChatDelegationInfo;
 }
 
 /**

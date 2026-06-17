@@ -12,6 +12,7 @@ import { ChatMessage } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
 import { ToolExecutionCard } from "./ToolExecutionCard";
 import { ToolExecutionBadge } from "./ToolExecutionBadge";
+import { DelegationBadge } from "./DelegationBadge";
 import { ToolExecutionGroup } from "./ToolExecutionGroup";
 import { ChatSystemEvent, type SystemEvent } from "./ChatSystemEvent";
 import { AskUserQuestionCard } from "./AskUserQuestionCard";
@@ -312,13 +313,13 @@ export function ChatWindow({
 
 	// Create a unified timeline of messages and system events
 	type TimelineItem =
-		| { type: "message"; data: MessagePublic; timestamp: string }
-		| { type: "tool_group"; data: MessagePublic[]; timestamp: string }
+		| { type: "message"; data: UnifiedMessage; timestamp: string }
+		| { type: "tool_group"; data: UnifiedMessage[]; timestamp: string }
 		| { type: "event"; data: SystemEvent; timestamp: string };
 
 	const timeline = useMemo<TimelineItem[]>(() => {
 		const items: TimelineItem[] = [];
-		let currentToolGroup: MessagePublic[] = [];
+		let currentToolGroup: UnifiedMessage[] = [];
 
 		const flushToolGroup = () => {
 			if (currentToolGroup.length > 0) {
@@ -501,30 +502,39 @@ export function ChatWindow({
 							return (
 								<div key={`tools-${item.data[0].id}`}>
 									<ToolExecutionGroup>
-										{item.data.map((tc) => (
-											<ToolExecutionBadge
-												key={tc.id}
-												toolCall={{
-													id: tc.tool_call_id || tc.id,
-													name: tc.tool_name || "unknown",
-													arguments: tc.tool_input || {},
-												}}
-												status={
-													tc.tool_state === "completed"
-														? "success"
-														: tc.tool_state === "error"
-															? "failed"
-															: "pending"
-												}
-												result={tc.tool_result}
-												error={
-													tc.tool_state === "error"
-														? (tc.tool_result as { error?: string })?.error
-														: undefined
-												}
-												durationMs={tc.duration_ms || undefined}
-											/>
-										))}
+										{item.data.map((tc) =>
+											tc.delegation ? (
+												<DelegationBadge
+													key={tc.id}
+													delegation={tc.delegation}
+													status={tc.tool_state ?? "running"}
+													durationMs={tc.duration_ms || undefined}
+												/>
+											) : (
+												<ToolExecutionBadge
+													key={tc.id}
+													toolCall={{
+														id: tc.tool_call_id || tc.id,
+														name: tc.tool_name || "unknown",
+														arguments: tc.tool_input || {},
+													}}
+													status={
+														tc.tool_state === "completed"
+															? "success"
+															: tc.tool_state === "error"
+																? "failed"
+																: "pending"
+													}
+													result={tc.tool_result}
+													error={
+														tc.tool_state === "error"
+															? (tc.tool_result as { error?: string })?.error
+															: undefined
+													}
+													durationMs={tc.duration_ms || undefined}
+												/>
+											),
+										)}
 									</ToolExecutionGroup>
 									{/* Inline reconnect prompts for any needs_reauth result. */}
 									{item.data.map((tc) => {

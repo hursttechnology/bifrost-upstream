@@ -408,6 +408,24 @@ export function useChatStream({
 					break;
 				}
 
+				// M6 multi-agent delegation. Both chunks reference the
+				// delegate_to_* tool_call message by message_id; we stash the
+				// delegation payload on it so the timeline renders the
+				// "✓ consulted <agent>" badge (with expandable detail once the
+				// response arrives via delegation_complete).
+				case "delegation_started":
+				case "delegation_complete": {
+					const convId = currentConversationIdRef.current;
+					if (convId && chunk.message_id && chunk.delegation) {
+						useChatStore
+							.getState()
+							.updateMessage(convId, chunk.message_id, {
+								delegation: chunk.delegation,
+							});
+					}
+					break;
+				}
+
 				case "error": {
 					const errorMsg = chunk.error || "Unknown error occurred";
 					setStreamError(errorMsg);

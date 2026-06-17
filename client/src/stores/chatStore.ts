@@ -18,6 +18,7 @@ import type {
 } from "@/components/chat/ToolExecutionCard";
 import type { SystemEvent } from "@/components/chat/ChatSystemEvent";
 import type { TodoItem } from "@/services/websocket";
+import type { UnifiedMessage } from "@/lib/chat-utils";
 
 // Use generated types from API
 type AgentSummary = components["schemas"]["AgentSummary"];
@@ -98,7 +99,7 @@ interface ChatActions {
 	updateMessage: (
 		conversationId: string,
 		messageId: string,
-		updates: Partial<MessagePublic> & {
+		updates: Partial<UnifiedMessage> & {
 			isStreaming?: boolean;
 			isFinal?: boolean;
 			toolExecutions?: Record<string, ToolExecutionState>;

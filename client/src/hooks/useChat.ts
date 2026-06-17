@@ -235,6 +235,27 @@ export function useCreateConversation() {
 	});
 }
 
+/** Hook to update a conversation (rename, move, model, instructions). */
+export function useUpdateConversation() {
+	const queryClient = useQueryClient();
+
+	return $api.useMutation("patch", "/api/chat/conversations/{conversation_id}", {
+		onSuccess: () => {
+			queryClient.invalidateQueries({
+				queryKey: ["get", "/api/chat/conversations"],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["get", "/api/chat/conversations/{conversation_id}"],
+			});
+		},
+		onError: (error) => {
+			toast.error("Failed to update conversation", {
+				description: getErrorMessage(error, "Unknown error"),
+			});
+		},
+	});
+}
+
 /** Hook to delete a conversation */
 export function useDeleteConversation() {
 	const queryClient = useQueryClient();

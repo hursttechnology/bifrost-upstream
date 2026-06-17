@@ -125,4 +125,30 @@ describe("ChatMessage — assistant messages", () => {
 		expect(screen.getByText(/Out: 42/)).toBeInTheDocument();
 		expect(screen.getByText(/1500ms/)).toBeInTheDocument();
 	});
+
+	it("renders the cost-tier glyph for a known tier", () => {
+		renderWithProviders(
+			<ChatMessage
+				message={makeMessage({
+					role: "assistant",
+					content: "done",
+					cost_tier: "balanced",
+				})}
+			/>,
+		);
+		expect(screen.getByLabelText("Balanced tier")).toHaveTextContent("⚖");
+	});
+
+	it("omits the cost-tier glyph for an unknown/missing tier", () => {
+		renderWithProviders(
+			<ChatMessage
+				message={makeMessage({
+					role: "assistant",
+					content: "done",
+					cost_tier: "mystery",
+				})}
+			/>,
+		);
+		expect(screen.queryByLabelText(/tier$/)).toBeNull();
+	});
 });

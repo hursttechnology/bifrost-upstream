@@ -2,6 +2,10 @@
  * Platform model registry + admin model-migration API.
  */
 
+import { useMemo } from "react";
+
+import { useQuery } from "@tanstack/react-query";
+
 import { apiClient } from "@/lib/api-client";
 import type { components } from "@/lib/v1";
 
@@ -122,10 +126,50 @@ export function lookupModel(
 	return null;
 }
 
+/**
+ * Resolve a model_id to its context-window size (tokens) via the catalog,
+ * using the same multi-fallback lookup chain as capability/price data.
+ * Returns null when the model isn't in the catalog or has no window recorded.
+ */
+export function contextWindowForModel(
+	modelId: string | null | undefined,
+	reseller: string | null,
+	byId: Record<string, PlatformModel>,
+): number | null {
+	if (!modelId) return null;
+	const match = lookupModel(modelId, reseller, byId);
+	return match?.context_window ?? null;
+}
+
 export async function listPlatformModels(): Promise<PlatformModelListResponse> {
 	const { data, error } = await apiClient.GET("/api/platform-models");
 	if (error) throw new Error(`Failed to list platform models: ${JSON.stringify(error)}`);
 	return data;
+}
+
+/**
+ * React-query hook returning the platform-model catalog indexed by model_id.
+ * Cached for 5 minutes — the registry changes rarely. Returns an empty map
+ * while loading or on error (callers degrade gracefully without enrichment).
+ */
+export function usePlatformModelsById(): Record<string, PlatformModel> {
+	const { data } = useQuery({
+		queryKey: ["platform-models"],
+		queryFn: listPlatformModels,
+		staleTime: 5 * 60 * 1000,
+	});
+	const models = data?.models;
+	return useMemoizedById(models);
+}
+
+function useMemoizedById(
+	models: PlatformModel[] | undefined,
+): Record<string, PlatformModel> {
+	return useMemo(() => {
+		const idx: Record<string, PlatformModel> = {};
+		for (const m of models ?? []) idx[m.model_id] = m;
+		return idx;
+	}, [models]);
 }
 
 export async function previewAllowlistMigration(

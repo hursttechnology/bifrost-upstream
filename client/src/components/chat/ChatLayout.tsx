@@ -5,15 +5,26 @@
  * Provides a responsive layout with sidebar and chat window.
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { PanelLeftClose, PanelLeft, Cpu, DollarSign } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatSidebar } from "./ChatSidebar";
 import { ChatWindow } from "./ChatWindow";
+import { ContextBudgetIndicator } from "./ContextBudgetIndicator";
 import { useChatStore } from "@/stores/chatStore";
-import { useConversation, useConversationStats } from "@/hooks/useChat";
+import {
+	useConversation,
+	useConversationStats,
+	useMessages,
+} from "@/hooks/useChat";
 import { useUserPermissions } from "@/hooks/useUserPermissions";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
+import { $api } from "@/lib/api-client";
+import {
+	contextWindowForModel,
+	resellerForEndpoint,
+	usePlatformModelsById,
+} from "@/services/platformModels";
 import { cn } from "@/lib/utils";
 import type { Workspace } from "@/services/workspaceService";
 import { WorkspaceContextRail } from "@/components/workspaces/WorkspaceContextRail";
@@ -68,6 +79,25 @@ export function ChatLayout({
 		activeConversationId ?? undefined,
 	);
 	const { isPlatformAdmin } = useUserPermissions();
+
+	// Context-budget indicator (§16.5): resolve the conversation's current
+	// model to its context window, then size it against the working-context
+	// usage from the message list. Visible to all users (not admin-gated).
+	const { data: messages } = useMessages(activeConversationId ?? undefined);
+	const catalogById = usePlatformModelsById();
+	const llmConfigQuery = $api.useQuery("get", "/api/admin/llm/config", undefined, {
+		staleTime: 5 * 60 * 1000,
+	});
+	const reseller = resellerForEndpoint(llmConfigQuery.data?.endpoint ?? null);
+	const contextWindow = useMemo(
+		() =>
+			contextWindowForModel(
+				conversation?.current_model ?? null,
+				reseller,
+				catalogById,
+			),
+		[conversation?.current_model, reseller, catalogById],
+	);
 
 	// Format token count for display (e.g., 12450 -> "12.5k")
 	const formatTokens = (count: number): string => {
@@ -174,6 +204,12 @@ export function ChatLayout({
 											</p>
 										)}
 								</div>
+
+								{/* Context budget indicator (all users) */}
+								<ContextBudgetIndicator
+									messages={messages ?? []}
+									contextWindow={contextWindow}
+								/>
 
 								{/* Platform Admin: Token/Cost Stats */}
 								{isPlatformAdmin &&

@@ -11,15 +11,19 @@
  *     chats are reachable by entering the workspace.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
 	ChevronRight,
+	Download,
+	FileJson,
+	FileText,
 	FolderKanban,
 	FolderInput,
 	Hammer,
 	MessageSquare,
 	MoreHorizontal,
+	Pencil,
 	Plus,
 	Search,
 	Settings2,
@@ -61,7 +65,9 @@ import {
 	useConversations,
 	useCreateConversation,
 	useDeleteConversation,
+	useUpdateConversation,
 } from "@/hooks/useChat";
+import { exportConversation } from "@/services/chatExport";
 import type { ConversationSummary } from "@/hooks/useChat";
 import { cn } from "@/lib/utils";
 import {
@@ -84,6 +90,75 @@ interface ChatSidebarProps {
 	onConversationSelected?: () => void;
 }
 
+/**
+ * Inline rename editor (§8.1). Self-focuses on mount, deferred a tick so the
+ * dropdown menu's focus-restore (radix returns focus to the trigger on close)
+ * doesn't fight it. Enter commits; Escape or losing focus cancels (reverts) —
+ * commit is an explicit Enter, which keeps the focus-restore race from ever
+ * persisting an unintended rename.
+ */
+function RenameInput({
+	initial,
+	onCommit,
+	onCancel,
+}: {
+	initial: string;
+	onCommit: (value: string) => void;
+	onCancel: () => void;
+}) {
+	const [value, setValue] = useState(initial);
+	const ref = useRef<HTMLInputElement>(null);
+	const settled = useRef(false);
+	// Becomes true only after focus has settled. Guards against the spurious
+	// focusout that fires synchronously when focus first moves into the field
+	// (and the dropdown menu's focus-restore race) — without it the editor
+	// would cancel itself before the user types. Commit is always an explicit
+	// Enter; blur (click-away) discards, matching a standard inline editor.
+	const ready = useRef(false);
+
+	useEffect(() => {
+		const raf = requestAnimationFrame(() => {
+			ref.current?.focus();
+			ref.current?.select();
+			// Arm blur-to-cancel only AFTER the focus (and any synchronous
+			// mount-time focusout) has settled, on the next tick.
+			setTimeout(() => {
+				ready.current = true;
+			}, 0);
+		});
+		return () => cancelAnimationFrame(raf);
+	}, []);
+
+	const finish = (commit: boolean, next: string) => {
+		if (settled.current) return; // guard double-fire (Enter → blur)
+		settled.current = true;
+		if (commit) onCommit(next);
+		else onCancel();
+	};
+
+	return (
+		<Input
+			ref={ref}
+			value={value}
+			aria-label="Rename conversation"
+			className="h-6 px-1.5 py-0 text-sm"
+			onClick={(e) => e.stopPropagation()}
+			onChange={(e) => setValue(e.target.value)}
+			onBlur={() => {
+				if (ready.current) finish(false, value);
+			}}
+			onKeyDown={(e) => {
+				e.stopPropagation();
+				if (e.key === "Enter") {
+					finish(true, e.currentTarget.value);
+				} else if (e.key === "Escape") {
+					finish(false, value);
+				}
+			}}
+		/>
+	);
+}
+
 export function ChatSidebar({
 	className,
 	activeWorkspace,
@@ -95,6 +170,9 @@ export function ChatSidebar({
 	const [searchTerm, setSearchTerm] = useState("");
 	const [deleteTarget, setDeleteTarget] =
 		useState<ConversationSummary | null>(null);
+	// Inline rename (§8.1): the id currently being renamed (draft lives in
+	// the RenameInput child).
+	const [renamingId, setRenamingId] = useState<string | null>(null);
 
 	const { activeConversationId, setActiveConversation, setActiveAgent } =
 		useChatStore();
@@ -111,6 +189,7 @@ export function ChatSidebar({
 
 	const createConversation = useCreateConversation();
 	const deleteConversation = useDeleteConversation();
+	const updateConversation = useUpdateConversation();
 	const moveConversation = useMoveConversation();
 	const { data: workspacesForMove } = useWorkspaces();
 
@@ -201,6 +280,36 @@ export function ChatSidebar({
 						description: (err as Error)?.message,
 					}),
 			},
+		);
+	};
+
+	const commitRename = (conv: ConversationSummary, draft: string) => {
+		const next = draft.trim();
+		setRenamingId(null);
+		// No-op when blank or unchanged — just close the editor.
+		if (!next || next === (conv.title || "")) return;
+		updateConversation.mutate(
+			{
+				params: { path: { conversation_id: conv.id } },
+				body: { title: next },
+			},
+			{
+				onError: (err) =>
+					toast.error("Rename failed", {
+						description: (err as Error)?.message,
+					}),
+			},
+		);
+	};
+
+	const handleExport = (
+		conv: ConversationSummary,
+		format: "markdown" | "json",
+	) => {
+		exportConversation(conv.id, format).catch((err) =>
+			toast.error("Export failed", {
+				description: (err as Error)?.message,
+			}),
 		);
 	};
 
@@ -390,11 +499,23 @@ export function ChatSidebar({
 									<MessageSquare className="size-3.5 mt-0.5 text-muted-foreground shrink-0" />
 									<div className="flex-1 min-w-0">
 										<div className="flex items-center justify-between gap-2">
-											<span className="font-medium text-sm truncate">
-												{conv.title ||
-													conv.agent_name ||
-													"Untitled"}
-											</span>
+											{renamingId === conv.id ? (
+												<RenameInput
+													initial={conv.title || ""}
+													onCommit={(v) =>
+														commitRename(conv, v)
+													}
+													onCancel={() =>
+														setRenamingId(null)
+													}
+												/>
+											) : (
+												<span className="font-medium text-sm truncate">
+													{conv.title ||
+														conv.agent_name ||
+														"Untitled"}
+												</span>
+											)}
 											<span className="text-[10px] opacity-0 group-hover:opacity-70 shrink-0 text-muted-foreground">
 												{formatTime(conv.updated_at)}
 											</span>
@@ -423,6 +544,46 @@ export function ChatSidebar({
 											align="end"
 											onClick={(e) => e.stopPropagation()}
 										>
+											<DropdownMenuItem
+												onClick={() =>
+													setRenamingId(conv.id)
+												}
+											>
+												<Pencil className="h-3.5 w-3.5 mr-2" />
+												Rename
+											</DropdownMenuItem>
+											<DropdownMenuSub>
+												<DropdownMenuSubTrigger>
+													<Download className="h-3.5 w-3.5 mr-2" />
+													<span>Export</span>
+													<ChevronRight className="ml-auto h-3 w-3" />
+												</DropdownMenuSubTrigger>
+												<DropdownMenuSubContent>
+													<DropdownMenuItem
+														onClick={() =>
+															handleExport(
+																conv,
+																"markdown",
+															)
+														}
+													>
+														<FileText className="h-3.5 w-3.5 mr-2 text-muted-foreground" />
+														Markdown
+													</DropdownMenuItem>
+													<DropdownMenuItem
+														onClick={() =>
+															handleExport(
+																conv,
+																"json",
+															)
+														}
+													>
+														<FileJson className="h-3.5 w-3.5 mr-2 text-muted-foreground" />
+														JSON
+													</DropdownMenuItem>
+												</DropdownMenuSubContent>
+											</DropdownMenuSub>
+											<DropdownMenuSeparator />
 											<DropdownMenuSub>
 												<DropdownMenuSubTrigger>
 													<FolderInput className="h-3.5 w-3.5 mr-2" />

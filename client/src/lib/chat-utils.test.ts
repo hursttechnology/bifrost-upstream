@@ -1,5 +1,89 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { generateLocalId, generateMessageId } from "./chat-utils";
+import {
+	budgetState,
+	computeContextUsage,
+	formatCompactTokens,
+	generateLocalId,
+	generateMessageId,
+} from "./chat-utils";
+
+type Msg = Parameters<typeof computeContextUsage>[0][number];
+
+describe("computeContextUsage", () => {
+	it("returns the most recent assistant input-token count, not a sum", () => {
+		const messages: Msg[] = [
+			{ role: "user", token_count_input: null },
+			{ role: "assistant", token_count_input: 1200 },
+			{ role: "user", token_count_input: null },
+			{ role: "assistant", token_count_input: 4800 },
+		];
+		expect(computeContextUsage(messages)).toBe(4800);
+	});
+
+	it("ignores user/tool messages and missing counts", () => {
+		const messages: Msg[] = [
+			{ role: "user", token_count_input: 999 },
+			{ role: "assistant", token_count_input: null },
+		];
+		expect(computeContextUsage(messages)).toBe(0);
+	});
+
+	it("returns 0 for an empty conversation", () => {
+		expect(computeContextUsage([])).toBe(0);
+	});
+});
+
+describe("budgetState", () => {
+	it("flags muted under 70%", () => {
+		const s = budgetState(60_000, 100_000);
+		expect(s.fraction).toBeCloseTo(0.6);
+		expect(s.tone).toBe("muted");
+	});
+
+	it("flags primary in the 70-85% band", () => {
+		expect(budgetState(75_000, 100_000).tone).toBe("primary");
+		expect(budgetState(70_000, 100_000).tone).toBe("primary");
+	});
+
+	it("flags destructive at or above 85%", () => {
+		expect(budgetState(85_000, 100_000).tone).toBe("destructive");
+		expect(budgetState(99_000, 100_000).tone).toBe("destructive");
+	});
+
+	it("caps the fraction at 1 when over budget", () => {
+		const s = budgetState(150_000, 100_000);
+		expect(s.fraction).toBe(1);
+		expect(s.tone).toBe("destructive");
+	});
+
+	it("returns a null fraction + muted tone when the window is unknown", () => {
+		const s = budgetState(40_000, null);
+		expect(s.window).toBeNull();
+		expect(s.fraction).toBeNull();
+		expect(s.tone).toBe("muted");
+	});
+
+	it("treats a non-positive window as unknown", () => {
+		expect(budgetState(10, 0).fraction).toBeNull();
+	});
+});
+
+describe("formatCompactTokens", () => {
+	it("formats sub-thousand verbatim", () => {
+		expect(formatCompactTokens(0)).toBe("0");
+		expect(formatCompactTokens(980)).toBe("980");
+	});
+
+	it("formats thousands with a k suffix", () => {
+		expect(formatCompactTokens(12_450)).toBe("12k");
+		expect(formatCompactTokens(1_000)).toBe("1k");
+	});
+
+	it("formats millions with an M suffix", () => {
+		expect(formatCompactTokens(2_000_000)).toBe("2M");
+		expect(formatCompactTokens(1_250_000)).toBe("1.3M");
+	});
+});
 
 const originalRandomUUID = crypto.randomUUID;
 const originalGetRandomValues = crypto.getRandomValues.bind(crypto);

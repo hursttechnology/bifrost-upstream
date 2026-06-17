@@ -154,6 +154,108 @@ class TestConversationsCRUD:
 
 
 # =============================================================================
+# Rename + Export Tests (M7)
+# =============================================================================
+
+
+class TestConversationRename:
+    """Inline rename via PATCH (§8.1)."""
+
+    def test_rename_title_round_trips(
+        self,
+        e2e_client,
+        platform_admin,
+        test_conversation,
+    ):
+        """PATCH title updates the row and the new title comes back on GET."""
+        conv_id = test_conversation["id"]
+        patch_resp = e2e_client.patch(
+            f"/api/chat/conversations/{conv_id}",
+            json={"title": "Renamed via PATCH"},
+            headers=platform_admin.headers,
+        )
+        assert patch_resp.status_code == 200, f"PATCH failed: {patch_resp.text}"
+        assert patch_resp.json()["title"] == "Renamed via PATCH"
+
+        get_resp = e2e_client.get(
+            f"/api/chat/conversations/{conv_id}",
+            headers=platform_admin.headers,
+        )
+        assert get_resp.status_code == 200
+        assert get_resp.json()["title"] == "Renamed via PATCH"
+
+    def test_rename_omitted_title_is_preserved(
+        self,
+        e2e_client,
+        platform_admin,
+        test_conversation,
+    ):
+        """A PATCH without title (exclude_unset) leaves the title untouched."""
+        conv_id = test_conversation["id"]
+        original = test_conversation["title"]
+        resp = e2e_client.patch(
+            f"/api/chat/conversations/{conv_id}",
+            json={"current_model": "claude-sonnet-4-6"},
+            headers=platform_admin.headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["title"] == original
+
+
+class TestConversationExport:
+    """Per-conversation export (§8.3)."""
+
+    def test_export_markdown(
+        self,
+        e2e_client,
+        platform_admin,
+        test_conversation,
+    ):
+        conv_id = test_conversation["id"]
+        resp = e2e_client.get(
+            f"/api/chat/conversations/{conv_id}/export",
+            headers=platform_admin.headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.headers["content-type"].startswith("text/markdown")
+        assert ".md" in resp.headers.get("content-disposition", "")
+        # Title heading is present.
+        assert resp.text.startswith("# E2E Test Conversation")
+
+    def test_export_json(
+        self,
+        e2e_client,
+        platform_admin,
+        test_conversation,
+    ):
+        conv_id = test_conversation["id"]
+        resp = e2e_client.get(
+            f"/api/chat/conversations/{conv_id}/export?format=json",
+            headers=platform_admin.headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.headers["content-type"].startswith("application/json")
+        assert ".json" in resp.headers.get("content-disposition", "")
+        body = resp.json()
+        assert body["id"] == conv_id
+        assert body["title"] == "E2E Test Conversation"
+        assert isinstance(body["messages"], list)
+
+    def test_export_nonexistent_conversation_404(
+        self,
+        e2e_client,
+        platform_admin,
+    ):
+        import uuid
+
+        resp = e2e_client.get(
+            f"/api/chat/conversations/{uuid.uuid4()}/export",
+            headers=platform_admin.headers,
+        )
+        assert resp.status_code == 404
+
+
+# =============================================================================
 # Conversation Access Control Tests
 # =============================================================================
 

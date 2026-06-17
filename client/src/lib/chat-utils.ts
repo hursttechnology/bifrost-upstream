@@ -22,6 +22,71 @@ export interface UnifiedMessage extends MessagePublic {
 }
 
 /**
+ * Compute the model's current working-context size from a message list.
+ *
+ * The relevant number for a context-budget indicator is what the model saw
+ * on its most recent turn — i.e. the latest assistant message's input-token
+ * count (which already includes system prompt + history + the new user turn).
+ * Cumulative input+output across the whole conversation would over-count,
+ * since each turn re-sends the prior context. Returns 0 when no assistant
+ * message has reported an input count yet.
+ */
+export function computeContextUsage(
+  messages: Pick<MessagePublic, "role" | "token_count_input">[],
+): number {
+  let usage = 0;
+  for (const m of messages) {
+    if (m.role === "assistant" && typeof m.token_count_input === "number") {
+      usage = m.token_count_input; // last writer wins → most recent turn
+    }
+  }
+  return usage;
+}
+
+export type BudgetTone = "muted" | "primary" | "destructive";
+
+export interface BudgetState {
+  /** Tokens currently in the model's working context. */
+  used: number;
+  /** The model's full context window, or null when unknown. */
+  window: number | null;
+  /** Fraction 0..1 of the window in use, or null when window unknown. */
+  fraction: number | null;
+  /** Whether the percentage crossed the compaction-warning line (≥85%). */
+  tone: BudgetTone;
+}
+
+/**
+ * Map raw usage + window into the indicator's visual state (§16.5):
+ *   <70% muted · 70-85% primary · ≥85% destructive.
+ * Window unknown → muted with a null fraction (bar renders empty).
+ */
+export function budgetState(used: number, window: number | null): BudgetState {
+  if (!window || window <= 0) {
+    return { used, window: null, fraction: null, tone: "muted" };
+  }
+  const fraction = Math.min(used / window, 1);
+  const tone: BudgetTone =
+    fraction >= 0.85 ? "destructive" : fraction >= 0.7 ? "primary" : "muted";
+  return { used, window, fraction, tone };
+}
+
+/**
+ * Compact token formatting for the budget bar: 980 → "980", 12450 → "12k",
+ * 1_250_000 → "1.3M". Tuned for terse header display, not exactness.
+ */
+export function formatCompactTokens(count: number): string {
+  if (count >= 1_000_000) {
+    const m = count / 1_000_000;
+    return `${m % 1 === 0 ? m.toFixed(0) : m.toFixed(1)}M`;
+  }
+  if (count >= 1_000) {
+    return `${Math.round(count / 1_000)}k`;
+  }
+  return String(count);
+}
+
+/**
  * Generate a stable UUID for client-side messages
  */
 export function generateMessageId(): string {

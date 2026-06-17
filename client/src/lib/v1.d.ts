@@ -3769,22 +3769,22 @@ export interface paths {
          * Execute workflow via API key
          * @description Execute an endpoint-enabled workflow using an API key for authentication
          */
-        get: operations["execute_endpoint_api_endpoints__workflow_id__post"];
+        get: operations["execute_endpoint_api_endpoints__workflow_id__get"];
         /**
          * Execute workflow via API key
          * @description Execute an endpoint-enabled workflow using an API key for authentication
          */
-        put: operations["execute_endpoint_api_endpoints__workflow_id__post"];
+        put: operations["execute_endpoint_api_endpoints__workflow_id__get"];
         /**
          * Execute workflow via API key
          * @description Execute an endpoint-enabled workflow using an API key for authentication
          */
-        post: operations["execute_endpoint_api_endpoints__workflow_id__post"];
+        post: operations["execute_endpoint_api_endpoints__workflow_id__get"];
         /**
          * Execute workflow via API key
          * @description Execute an endpoint-enabled workflow using an API key for authentication
          */
-        delete: operations["execute_endpoint_api_endpoints__workflow_id__post"];
+        delete: operations["execute_endpoint_api_endpoints__workflow_id__get"];
         options?: never;
         head?: never;
         patch?: never;
@@ -5413,6 +5413,7 @@ export interface paths {
          * @description Update mutable fields on a conversation.
          *
          *     Editable fields:
+         *     - ``title``: inline rename in the sidebar. Replaces the auto-generated title.
          *     - ``workspace_id``: "Move to workspace" affordance. Null = general pool.
          *     - ``current_model``: per-conversation model selection set by the picker.
          *     - ``instructions``: per-conversation custom instructions appended to
@@ -5464,6 +5465,30 @@ export interface paths {
          *     For streaming responses, use the WebSocket endpoint.
          */
         post: operations["send_message_api_chat_conversations__conversation_id__messages_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/chat/conversations/{conversation_id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export Conversation
+         * @description Export a conversation as Markdown (default) or JSON (§8.3).
+         *
+         *     Read-only. Returns a downloadable attachment with a content-disposition
+         *     filename derived from the conversation title. Markdown renders tool calls
+         *     as collapsible blocks; JSON is the structured round-trip shape.
+         */
+        get: operations["export_conversation_api_chat_conversations__conversation_id__export_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -12236,6 +12261,11 @@ export interface components {
          */
         ConversationUpdate: {
             /**
+             * Title
+             * @description Conversation title. Set by inline rename in the sidebar.
+             */
+            title?: string | null;
+            /**
              * Workspace Id
              * @description New workspace id (or null to move to the general pool).
              */
@@ -17656,6 +17686,11 @@ export interface components {
             token_count_output?: number | null;
             /** Model */
             model?: string | null;
+            /**
+             * Cost Tier
+             * @description Symbolic cost tier that handled this turn (fast / balanced / premium).
+             */
+            cost_tier?: string | null;
             /** Duration Ms */
             duration_ms?: number | null;
             /** Sequence */
@@ -30306,7 +30341,7 @@ export interface operations {
             };
         };
     };
-    execute_endpoint_api_endpoints__workflow_id__post: {
+    execute_endpoint_api_endpoints__workflow_id__get: {
         parameters: {
             query?: never;
             header: {
@@ -30339,7 +30374,7 @@ export interface operations {
             };
         };
     };
-    execute_endpoint_api_endpoints__workflow_id__post: {
+    execute_endpoint_api_endpoints__workflow_id__get: {
         parameters: {
             query?: never;
             header: {
@@ -30372,7 +30407,7 @@ export interface operations {
             };
         };
     };
-    execute_endpoint_api_endpoints__workflow_id__post: {
+    execute_endpoint_api_endpoints__workflow_id__get: {
         parameters: {
             query?: never;
             header: {
@@ -30405,7 +30440,7 @@ export interface operations {
             };
         };
     };
-    execute_endpoint_api_endpoints__workflow_id__post: {
+    execute_endpoint_api_endpoints__workflow_id__get: {
         parameters: {
             query?: never;
             header: {
@@ -33251,6 +33286,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ChatResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    export_conversation_api_chat_conversations__conversation_id__export_get: {
+        parameters: {
+            query?: {
+                format?: "markdown" | "json";
+            };
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

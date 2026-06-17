@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Literal, cast
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
@@ -327,6 +327,7 @@ async def update_conversation(
     """Update mutable fields on a conversation.
 
     Editable fields:
+    - ``title``: inline rename in the sidebar. Replaces the auto-generated title.
     - ``workspace_id``: "Move to workspace" affordance. Null = general pool.
     - ``current_model``: per-conversation model selection set by the picker.
     - ``instructions``: per-conversation custom instructions appended to
@@ -349,6 +350,9 @@ async def update_conversation(
         )
 
     update_fields = payload.model_dump(exclude_unset=True)
+    if "title" in update_fields:
+        conversation.title = update_fields["title"]
+
     if "workspace_id" in update_fields:
         new_workspace_id = update_fields["workspace_id"]
         if new_workspace_id is not None:
@@ -580,6 +584,7 @@ async def get_messages(
             token_count_input=m.token_count_input,
             token_count_output=m.token_count_output,
             model=m.model,
+            cost_tier=m.cost_tier,
             duration_ms=m.duration_ms,
             sequence=m.sequence,
             parent_message_id=m.parent_message_id,
@@ -589,6 +594,63 @@ async def get_messages(
         )
         for m, sib_count, sib_index in rows
     ]
+
+
+@router.get("/conversations/{conversation_id}/export")
+async def export_conversation(
+    conversation_id: UUID,
+    db: DbSession,
+    user: CurrentActiveUser,
+    format: Literal["markdown", "json"] = "markdown",
+) -> Response:
+    """Export a conversation as Markdown (default) or JSON (§8.3).
+
+    Read-only. Returns a downloadable attachment with a content-disposition
+    filename derived from the conversation title. Markdown renders tool calls
+    as collapsible blocks; JSON is the structured round-trip shape.
+    """
+    from src.services import chat_export
+
+    result = await db.execute(
+        select(Conversation)
+        .where(Conversation.id == conversation_id)
+        .where(Conversation.user_id == user.user_id)
+    )
+    conversation = result.scalar_one_or_none()
+    if not conversation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Conversation {conversation_id} not found",
+        )
+
+    messages_result = await db.execute(
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.sequence.asc())
+    )
+    messages = list(messages_result.scalars().all())
+
+    # Slug the title for the download filename; fall back to the id.
+    raw = (conversation.title or "").strip()
+    slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in raw).strip("-")
+    stem = slug[:60] or f"conversation-{conversation_id}"
+
+    if format == "json":
+        body = chat_export.conversation_to_json(conversation, messages)
+        media_type = "application/json"
+        filename = f"{stem}.json"
+    else:
+        body = chat_export.conversation_to_markdown(conversation, messages)
+        media_type = "text/markdown"
+        filename = f"{stem}.md"
+
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
 
 
 @router.post("/conversations/{conversation_id}/messages")

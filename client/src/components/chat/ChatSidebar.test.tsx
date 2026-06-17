@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderWithProviders, screen, fireEvent } from "@/test-utils";
+import { renderWithProviders, screen, fireEvent, waitFor } from "@/test-utils";
 
 // --- mocks --------------------------------------------------------------
 
@@ -25,6 +25,7 @@ const conversationsRef: {
 
 const mockCreateMutate = vi.fn();
 const mockDeleteMutate = vi.fn();
+const mockUpdateMutate = vi.fn();
 
 vi.mock("@/hooks/useChat", () => ({
 	useConversations: () => ({
@@ -39,6 +40,18 @@ vi.mock("@/hooks/useChat", () => ({
 		mutate: mockDeleteMutate,
 		isPending: false,
 	}),
+	useUpdateConversation: () => ({
+		mutate: mockUpdateMutate,
+		isPending: false,
+	}),
+}));
+
+const mockExportConversation = vi.fn(
+	(_id: string, _format: string): Promise<void> => Promise.resolve(),
+);
+vi.mock("@/services/chatExport", () => ({
+	exportConversation: (id: string, format: string) =>
+		mockExportConversation(id, format),
 }));
 
 // Chat store: we only need a handful of selectors / setters.
@@ -83,6 +96,8 @@ beforeEach(() => {
 	storeState.setActiveAgent.mockReset();
 	mockCreateMutate.mockReset();
 	mockDeleteMutate.mockReset();
+	mockUpdateMutate.mockReset();
+	mockExportConversation.mockClear();
 	mockNavigate.mockReset();
 });
 
@@ -209,5 +224,62 @@ describe("ChatSidebar — delete flow", () => {
 		});
 
 		void container;
+	});
+});
+
+describe("ChatSidebar — rename flow (§8.1)", () => {
+	it("renames inline and PATCHes the new title on Enter", async () => {
+		conversationsRef.data = [conv({ id: "c-1", title: "Alpha" })];
+		const { user } = renderWithProviders(<ChatSidebar />);
+
+		const row = screen.getByText("Alpha").closest("div.group")!;
+		await user.click(row.querySelector("button")!);
+		// fireEvent (not user.click) for radix menu items — userEvent's
+		// pointer simulation doesn't reliably fire the item's React onClick
+		// under happy-dom.
+		fireEvent.click(await screen.findByText(/^rename$/i));
+
+		const input = (await screen.findByLabelText(
+			/rename conversation/i,
+		)) as HTMLInputElement;
+		fireEvent.change(input, { target: { value: "Renamed" } });
+		await waitFor(() => expect(input.value).toBe("Renamed"));
+		fireEvent.keyDown(input, { key: "Enter" });
+
+		expect(mockUpdateMutate).toHaveBeenCalledWith(
+			{
+				params: { path: { conversation_id: "c-1" } },
+				body: { title: "Renamed" },
+			},
+			expect.anything(),
+		);
+	});
+
+	it("does not PATCH when the title is unchanged", async () => {
+		conversationsRef.data = [conv({ id: "c-1", title: "Alpha" })];
+		const { user } = renderWithProviders(<ChatSidebar />);
+
+		const row = screen.getByText("Alpha").closest("div.group")!;
+		await user.click(row.querySelector("button")!);
+		fireEvent.click(await screen.findByText(/^rename$/i));
+
+		const input = await screen.findByLabelText(/rename conversation/i);
+		fireEvent.keyDown(input, { key: "Enter" });
+
+		expect(mockUpdateMutate).not.toHaveBeenCalled();
+	});
+});
+
+describe("ChatSidebar — export flow (§8.3)", () => {
+	it("exports markdown from the overflow menu", async () => {
+		conversationsRef.data = [conv({ id: "c-1", title: "Alpha" })];
+		const { user } = renderWithProviders(<ChatSidebar />);
+
+		const row = screen.getByText("Alpha").closest("div.group")!;
+		await user.click(row.querySelector("button")!);
+		fireEvent.click(await screen.findByText(/^export$/i));
+		fireEvent.click(await screen.findByText(/^markdown$/i));
+
+		expect(mockExportConversation).toHaveBeenCalledWith("c-1", "markdown");
 	});
 });

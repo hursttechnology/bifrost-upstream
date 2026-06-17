@@ -260,6 +260,11 @@ class ConversationCreate(BaseModel):
 
 class ConversationUpdate(BaseModel):
     """Patch model for updating a conversation."""
+    title: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Conversation title. Set by inline rename in the sidebar.",
+    )
     workspace_id: UUID | None = Field(
         default=None,
         description="New workspace id (or null to move to the general pool).",
@@ -359,6 +364,10 @@ class MessagePublic(BaseModel):
     token_count_input: int | None = None
     token_count_output: int | None = None
     model: str | None = None
+    cost_tier: str | None = Field(
+        default=None,
+        description="Symbolic cost tier that handled this turn (fast / balanced / premium).",
+    )
     duration_ms: int | None = None
     sequence: int
     created_at: datetime

@@ -55,6 +55,14 @@ const conversationRef: { data: Record<string, unknown> | undefined } = {
 vi.mock("@/hooks/useChat", () => ({
 	useConversation: () => ({ data: conversationRef.data }),
 	useConversationStats: () => null,
+	useMessages: () => ({ data: [] }),
+}));
+
+// Context-budget indicator deps: no catalog/window in tests → renders null.
+vi.mock("@/services/platformModels", () => ({
+	usePlatformModelsById: () => ({}),
+	resellerForEndpoint: () => null,
+	contextWindowForModel: () => null,
 }));
 
 vi.mock("@/hooks/useUserPermissions", () => ({

@@ -9,6 +9,17 @@
 import { Bot } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { components } from "@/lib/v1";
+import {
+	COST_TIER_GLYPH,
+	COST_TIER_LABEL,
+	type CostTier,
+} from "@/services/platformModels";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipProvider,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -71,6 +82,37 @@ function MentionBadge({ name }: { name: string }) {
 			<Bot className="h-3 w-3 shrink-0" />
 			{name}
 		</span>
+	);
+}
+
+const COST_TIERS: ReadonlySet<string> = new Set<CostTier>([
+	"fast",
+	"balanced",
+	"premium",
+]);
+
+/**
+ * Symbolic per-message cost-tier badge (§5.6 / §16.5): ⚡ / ⚖ / 💎. Dollars
+ * stay in the admin dashboard — chat is anxiety-free. Renders nothing for an
+ * unknown/missing tier.
+ */
+function CostTierBadge({ tier }: { tier: string | null | undefined }) {
+	if (!tier || !COST_TIERS.has(tier)) return null;
+	const t = tier as CostTier;
+	return (
+		<TooltipProvider delayDuration={200}>
+			<Tooltip>
+				<TooltipTrigger asChild>
+					<span
+						className="cursor-default select-none"
+						aria-label={`${COST_TIER_LABEL[t]} tier`}
+					>
+						{COST_TIER_GLYPH[t]}
+					</span>
+				</TooltipTrigger>
+				<TooltipContent>{COST_TIER_LABEL[t]} tier</TooltipContent>
+			</Tooltip>
+		</TooltipProvider>
 	);
 }
 
@@ -292,18 +334,25 @@ export function ChatMessage({
 					</ReactMarkdown>
 				</div>
 
-				{/* Token Usage - shown on hover */}
-				{(message.token_count_input != null && message.token_count_input > 0 || message.token_count_output != null && message.token_count_output > 0) && (
-					<div className="mt-2 flex gap-3 text-xs text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity">
-						{!!message.token_count_input && (
-							<span>In: {message.token_count_input}</span>
-						)}
-						{!!message.token_count_output && (
-							<span>Out: {message.token_count_output}</span>
-						)}
-						{!!message.duration_ms && (
-							<span>{message.duration_ms}ms</span>
-						)}
+				{/* Footer: cost tier (always visible) + token usage (on hover) */}
+				{(message.cost_tier ||
+					(message.token_count_input != null &&
+						message.token_count_input > 0) ||
+					(message.token_count_output != null &&
+						message.token_count_output > 0)) && (
+					<div className="mt-2 flex items-center gap-3 text-xs text-muted-foreground">
+						<CostTierBadge tier={message.cost_tier} />
+						<div className="flex gap-3 opacity-0 group-hover:opacity-100 transition-opacity">
+							{!!message.token_count_input && (
+								<span>In: {message.token_count_input}</span>
+							)}
+							{!!message.token_count_output && (
+								<span>Out: {message.token_count_output}</span>
+							)}
+							{!!message.duration_ms && (
+								<span>{message.duration_ms}ms</span>
+							)}
+						</div>
 					</div>
 				)}
 			</div>

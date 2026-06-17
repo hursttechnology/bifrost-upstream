@@ -138,7 +138,15 @@ CLI_ROUTES: tuple[str, ...] = ("/api/version",)
 #: the live fingerprint, this test fails — update this value, and bump
 #: CONTRACT_VERSION (both sides) IF the change is breaking. See module docstring.
 EXPECTED_CONTRACT_FINGERPRINT = (
-    "e6460f50e29885a406c962823bf9490db0272221c76c7b5f5e12adf03ce0f9f4"
+    # ApplicationCreate.app_model default flipped inline_v1 → standalone_v2
+    # (2026-06-13). CONTRACT_VERSION bumped to 3: an old CLI would default a new
+    # `apps create` to v1 against a v2-default server, so old clients are gated.
+    #
+    # SDKIntegrationsGetRequest gained optional `solution` (2026-06-14,
+    # RequiredConnectionUnset escalation). ADDITIVE — an old CLI simply omits the
+    # field and keeps silent-None behavior, so no CONTRACT_VERSION bump; fingerprint
+    # refreshed only.
+    "a1a2c7ef31c5dabb5b3be5256f1f49e756c8ba3252596fc8efa8e045fcfee16d"
 )
 
 

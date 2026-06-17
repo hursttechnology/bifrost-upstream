@@ -9,6 +9,7 @@ S3 key resolution is delegated to `shared.file_paths.resolve_s3_key`.
 """
 
 import asyncio
+import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -80,26 +81,25 @@ class LocalBackend(FileBackend):
             # Freeform local locations are siblings of workspace_root.
             base_dir = self.workspace_root.parent / location
 
-        # Resolve the path
-        p = Path(path)
-        if not p.is_absolute():
-            p = base_dir / p
-
+        # Resolve + sandbox the (possibly attacker-controlled) path against
+        # base_dir. Implemented with os.path.realpath + a startswith prefix
+        # check (the barrier static analysis recognizes for path traversal);
+        # the trailing os.sep prevents sibling-prefix confusion (base
+        # "/tmp/foo" must not accept "/tmp/foo_evil/x").
         try:
-            p = p.resolve()
+            base_real = os.path.realpath(base_dir)
+            resolved = os.path.realpath(os.path.join(base_real, path))
         except Exception as e:
             raise ValueError(f"Invalid path: {path}") from e
 
-        # Sandbox check - ensure path is within the base directory.
-        # Use relative_to() rather than str.startswith() to avoid sibling-prefix
-        # confusion (e.g., base "/tmp/foo" would otherwise accept "/tmp/foo_evil/x").
-        base_resolved = base_dir.resolve()
-        try:
-            p.relative_to(base_resolved)
-        except ValueError as e:
-            raise ValueError(f"Path must be within {location} directory: {path}") from e
+        # Pure startswith barrier (the form static analysis recognizes), with a
+        # trailing os.sep on BOTH sides so it accepts base_dir itself (the
+        # empty-path/list("") case) and real descendants, but not a sibling
+        # sharing a string prefix ("/tmp/foo" must reject "/tmp/foo_evil/x").
+        if not (resolved + os.sep).startswith(base_real + os.sep):
+            raise ValueError(f"Path must be within {location} directory: {path}")
 
-        return p
+        return Path(resolved)
 
     async def read(self, path: str, location: Location, scope: str | None = None) -> bytes:
         """Read file from local filesystem. Scope is ignored in local mode."""

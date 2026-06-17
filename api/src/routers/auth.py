@@ -49,7 +49,7 @@ from src.models.contracts.passkeys import (
     SetupPasskeyVerifyResponse,
 )
 from src.config import get_settings
-from src.core.auth import CurrentActiveUser
+from src.core.auth import CurrentActiveUser, CurrentSuperuser
 from src.core.db_deps import DbSession
 from src.core.log_safety import log_safe
 from src.core.rate_limit import auth_limiter, mfa_limiter, get_client_ip
@@ -67,6 +67,7 @@ from src.core.security import (
 )
 from src.repositories.users import UserRepository
 from src.services.user_provisioning import ensure_user_provisioned, get_user_roles
+from shared.external_access import resolve_external_claim
 
 logger = logging.getLogger(__name__)
 
@@ -626,6 +627,7 @@ async def mfa_initial_verify(
         "email": user.email,
         "name": user.name or user.email.split("@")[0],
         "is_superuser": user.is_superuser,
+        "is_external": await resolve_external_claim(db, user),
         "org_id": str(user.organization_id) if user.organization_id else None,
         "roles": roles,
     }
@@ -773,6 +775,7 @@ async def _generate_login_tokens(user, db, response: Response | None = None) -> 
         "email": user.email,
         "name": user.name or user.email.split("@")[0],
         "is_superuser": user.is_superuser,
+        "is_external": await resolve_external_claim(db, user),
         "org_id": str(user.organization_id) if user.organization_id else None,
         "roles": roles,
     }
@@ -935,6 +938,7 @@ async def refresh_token(
         "email": user.email,
         "name": user.name or user.email.split("@")[0],
         "is_superuser": user.is_superuser,
+        "is_external": await resolve_external_claim(db, user),
         "org_id": str(user.organization_id) if user.organization_id else None,
         "roles": roles,
     }
@@ -1102,7 +1106,7 @@ class AdminRevokeRequest(BaseModel):
 @router.post("/admin/revoke-user", response_model=RevokeAllResponse)
 async def admin_revoke_user_sessions(
     revoke_data: AdminRevokeRequest,
-    current_user: CurrentActiveUser,
+    current_user: CurrentSuperuser,
     db: DbSession,
 ) -> RevokeAllResponse:
     """
@@ -1124,13 +1128,6 @@ async def admin_revoke_user_sessions(
     Raises:
         HTTPException: If not admin or user not found
     """
-    # Require platform admin
-    if not current_user.is_superuser:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Platform admin privileges required",
-        )
-
     # Verify target user exists
     user_repo = UserRepository(db)
     target_user = await user_repo.get_by_id(revoke_data.user_id)
@@ -1688,6 +1685,7 @@ async def setup_passkey_verify(
         "email": user.email,
         "name": user.name or user.email.split("@")[0],
         "is_superuser": user.is_superuser,
+        "is_external": await resolve_external_claim(db, user),
         "org_id": str(user.organization_id) if user.organization_id else None,
         "roles": roles,
     }

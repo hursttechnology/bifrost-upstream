@@ -215,3 +215,5 @@ system//home/
 client/preview/
 .shots/
 client/.shots-capture.mjs
+.desloppify/
+scorecard.png

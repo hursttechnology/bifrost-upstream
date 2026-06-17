@@ -10,6 +10,19 @@ if TYPE_CHECKING:
     pass
 
 
+def _validate_hex_color(v: str | None) -> str | None:
+    """Validate a ``#RGB`` / ``#RRGGBB`` hex color, or pass through ``None``."""
+    if v is None:
+        return v
+    if not v.startswith("#") or len(v) not in (4, 7):
+        raise ValueError("Primary color must be a valid hex color (e.g., #FFF or #FF5733)")
+    try:
+        int(v[1:], 16)
+    except ValueError:
+        raise ValueError("Primary color must be a valid hex color")
+    return v
+
+
 # ==================== ERROR MODELS ====================
 
 
@@ -38,8 +51,12 @@ class BrandingTerminology(BaseModel):
 
 class BrandingSettings(BaseModel):
     """Global platform branding configuration"""
+    application_name: str | None = Field(
+        default=None,
+        description="Product name shown in the UI (login, browser tab, header). Raw stored value; None when unset.",
+    )
     square_logo_url: str | None = Field(default=None, description="Square logo URL (for icons, 1:1 ratio)")
-    rectangle_logo_url: str | None = Field(default=None, description="Rectangle logo URL (for headers, 16:9 ratio)")
+    rectangle_logo_url: str | None = Field(default=None, description="Horizontal logo URL (for headers, ~4:1 ratio)")
     primary_color: str | None = Field(default=None, description="Primary brand color (hex format, e.g., #FF5733)")
     terminology: BrandingTerminology = Field(
         default_factory=BrandingTerminology,
@@ -49,20 +66,17 @@ class BrandingSettings(BaseModel):
     @field_validator('primary_color')
     @classmethod
     def validate_hex_color(cls, v):
-        """Validate hex color format"""
-        if v is None:
-            return v
-        if not v.startswith('#') or len(v) not in [4, 7]:
-            raise ValueError("Primary color must be a valid hex color (e.g., #FFF or #FF5733)")
-        try:
-            int(v[1:], 16)
-        except ValueError:
-            raise ValueError("Primary color must be a valid hex color")
-        return v
+        return _validate_hex_color(v)
 
 
 class BrandingUpdateRequest(BaseModel):
     """Request model for updating branding settings - logos use POST /logo/{type}"""
+    application_name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=40,
+        description="Product name shown in the UI. Omit to leave unchanged; use the reset endpoint to clear.",
+    )
     primary_color: str | None = Field(default=None, description="Primary color (hex code, e.g., #0066CC)")
     terminology: BrandingTerminology | None = Field(
         default=None,
@@ -72,16 +86,7 @@ class BrandingUpdateRequest(BaseModel):
     @field_validator('primary_color')
     @classmethod
     def validate_hex_color(cls, v):
-        """Validate hex color format"""
-        if v is None:
-            return v
-        if not v.startswith('#') or len(v) not in [4, 7]:
-            raise ValueError("Primary color must be a valid hex color (e.g., #FFF or #FF5733)")
-        try:
-            int(v[1:], 16)
-        except ValueError:
-            raise ValueError("Primary color must be a valid hex color")
-        return v
+        return _validate_hex_color(v)
 
 
 # ==================== FILE UPLOAD MODELS ====================

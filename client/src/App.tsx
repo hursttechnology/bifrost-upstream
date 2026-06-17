@@ -1,5 +1,11 @@
-import { Suspense } from "react";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { Suspense, useEffect } from "react";
+import {
+	BrowserRouter,
+	Routes,
+	Route,
+	useLocation,
+	matchPath,
+} from "react-router-dom";
 import { Layout } from "@/components/layout/Layout";
 import { ContentLayout } from "@/components/layout/ContentLayout";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
@@ -14,6 +20,7 @@ import { useEditorStore } from "@/stores/editorStore";
 import { useQuickAccessStore } from "@/stores/quickAccessStore";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { OrgScopeProvider, useOrgScope } from "@/contexts/OrgScopeContext";
+import { useApplicationName } from "@/lib/applicationName";
 import {
 	KeyboardProvider,
 	useCmdCtrlShortcut,
@@ -32,6 +39,14 @@ const Roles = lazyWithReload(() =>
 );
 const RoleDetail = lazyWithReload(() =>
 	import("@/pages/RoleDetail").then((m) => ({ default: m.RoleDetail })),
+);
+const Solutions = lazyWithReload(() =>
+	import("@/pages/Solutions").then((m) => ({ default: m.Solutions })),
+);
+const SolutionDetail = lazyWithReload(() =>
+	import("@/pages/SolutionDetail").then((m) => ({
+		default: m.SolutionDetail,
+	})),
 );
 const Users = lazyWithReload(() =>
 	import("@/pages/Users").then((m) => ({ default: m.Users })),
@@ -202,6 +217,8 @@ const MCPConnectionEdit = lazyWithReload(() =>
 
 function AppRoutes() {
 	const { brandingLoaded } = useOrgScope();
+	const applicationName = useApplicationName();
+	const location = useLocation();
 	const isQuickAccessOpen = useQuickAccessStore((state) => state.isOpen);
 	const openQuickAccess = useQuickAccessStore(
 		(state) => state.openQuickAccess,
@@ -223,6 +240,22 @@ function AppRoutes() {
 			openEditor();
 		}
 	});
+
+	// Base browser-tab title. index.html ships the default literal for first
+	// paint; once branding resolves, reflect the (possibly custom) product name.
+	// The app-runner and app-preview routes drive their own
+	// "<App> | <product>" title via useDocumentChrome (AppRouter), so skip those
+	// paths here to avoid clobbering them. The app *editor* route
+	// (apps/:id/edit/*) does NOT set its own title, so it must NOT be skipped.
+	const isAppRunnerRoute =
+		(matchPath("/apps/:applicationId/preview/*", location.pathname) !==
+			null ||
+			matchPath("/apps/:applicationId/*", location.pathname) !== null) &&
+		matchPath("/apps/:applicationId/edit/*", location.pathname) === null;
+	useEffect(() => {
+		if (isAppRunnerRoute) return;
+		document.title = applicationName;
+	}, [applicationName, isAppRunnerRoute]);
 
 	// Wait for branding colors to load before rendering
 	// Logo component handles its own skeleton loading state
@@ -398,6 +431,24 @@ function AppRoutes() {
 							element={
 								<ProtectedRoute requirePlatformAdmin>
 									<RoleDetail />
+								</ProtectedRoute>
+							}
+						/>
+
+						{/* Solutions - PlatformAdmin only */}
+						<Route
+							path="solutions"
+							element={
+								<ProtectedRoute requirePlatformAdmin>
+									<Solutions />
+								</ProtectedRoute>
+							}
+						/>
+						<Route
+							path="solutions/:solutionId"
+							element={
+								<ProtectedRoute requirePlatformAdmin>
+									<SolutionDetail />
 								</ProtectedRoute>
 							}
 						/>

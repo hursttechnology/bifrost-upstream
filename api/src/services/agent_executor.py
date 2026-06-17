@@ -172,6 +172,7 @@ class AgentExecutor:
                 org_id=user.organization_id,
                 user_id=user.user_id,
                 is_superuser=user.is_superuser,
+                is_external=user.is_external,
             )
             accessible_agent = await repo.get_agent_with_access_check(new_agent.id)
             if accessible_agent is None:
@@ -238,6 +239,7 @@ class AgentExecutor:
             user_id=user.user_id if user else None,
             org_id=user.organization_id if user else None,
             is_superuser=user.is_superuser if user else False,
+            is_external=user.is_external if user else False,
         )
 
         try:
@@ -337,11 +339,11 @@ IMPORTANT: When the user's request can be fulfilled using one of your tools, you
                     content=(messages[0].content or "") + tool_instruction,
                 )
 
-            # 4. Get LLM client
+            # 6. Get LLM client
             async with self._db() as session:
                 llm_client = await get_llm_client(session)
 
-            # 5a. Check context size and prune if needed
+            # 7. Check context size and prune if needed
             estimated_tokens = self._estimate_tokens(messages)
 
             if estimated_tokens > CONTEXT_WARNING_TOKENS:
@@ -380,7 +382,7 @@ IMPORTANT: When the user's request can be fulfilled using one of your tools, you
                         ),
                     )
 
-            # 5. Run completion loop with tool calling
+            # 8. Run completion loop with tool calling
             iteration = 0
             final_content = ""
             final_tool_calls: list[ToolCall] = []
@@ -612,7 +614,7 @@ IMPORTANT: When the user's request can be fulfilled using one of your tools, you
 
                 # Continue loop to get LLM response with tool results
 
-            # 6. Save final assistant message (using pre-generated ID)
+            # 9. Save final assistant message (using pre-generated ID)
             duration_ms = int((time.time() - start_time) * 1000)
             assistant_msg = await self._save_message(
                 conversation_id=conversation.id,
@@ -625,7 +627,7 @@ IMPORTANT: When the user's request can be fulfilled using one of your tools, you
                 message_id=assistant_message_id,
             )
 
-            # 6b. Record AI usage
+            # 9b. Record AI usage
             try:
                 await self._record_ai_usage(
                     provider=llm_client.provider_name,
@@ -641,7 +643,7 @@ IMPORTANT: When the user's request can be fulfilled using one of your tools, you
             except Exception as e:
                 logger.warning(f"Failed to record AI usage: {e}")
 
-            # 7. Yield done chunk with final content (for non-streaming mode)
+            # 10. Yield done chunk with final content (for non-streaming mode)
             yield ChatStreamChunk(
                 type="done",
                 content=final_content if final_content else None,
@@ -1769,7 +1771,10 @@ IMPORTANT: When the user's request can be fulfilled using one of your tools, you
         """
         Execute a knowledge search using the agent's configured namespaces.
 
-        This is a built-in tool that doesn't require a workflow.
+        This is a built-in tool that doesn't require a workflow. The search
+        is the AGENT's own grounding (the agent is the access boundary the
+        caller was granted), so it always uses the full org+global cascade
+        regardless of who is chatting.
         """
         start_time = time.time()
 
@@ -1815,7 +1820,7 @@ IMPORTANT: When the user's request can be fulfilled using one of your tools, you
                     query_embedding=query_embedding,
                     namespace=namespaces,
                     limit=limit,
-                    fallback=True,  # Search org + global
+                    fallback=True,
                 )
 
             duration_ms = int((time.time() - start_time) * 1000)

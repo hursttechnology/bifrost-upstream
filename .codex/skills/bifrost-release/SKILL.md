@@ -5,6 +5,18 @@ description: Build and release Bifrost. Use when pushing commits to main, cuttin
 
 # Bifrost Release
 
+## Release cadence (the three rungs, and who they're for)
+
+Bifrost ships on a deliberate three-rung ladder. Know which audience each rung serves before you cut it:
+
+| Rung | Tag / image | Cadence | Stability promise | Who runs it |
+|------|-------------|---------|-------------------|-------------|
+| **dev** | `:dev` (every merge to main) | Continuous | **Bleeding edge. Expect bugs.** This is where the maintainer flushes out defects in his own production before they reach anyone else. | The maintainer's prod + community members who want the very latest and accept breakage. |
+| **pre-release** | `vX.Y.Z-rc.N` → versioned images, GitHub Release marked *pre-release*, **no `:latest`** | Roughly monthly, **in between** full releases | **Safer than dev** — a candidate that's been through the gates and is being soak-tested, but not yet blessed as final. | Operators who want fresher-than-monthly without riding `:dev`. |
+| **full release** | `vX.Y.Z` → versioned images + `:latest` + final GitHub Release | Roughly monthly | **Blessed/stable.** The default for production installs. | Everyone on `:latest`. |
+
+The intent going forward (announce this in the first full release that introduces it): **full releases land roughly monthly; between them we cut `-rc.N` pre-releases that are intended to be safer but more frequent. `:dev` remains bleeding edge and will contain bugs the maintainer intends to find in his own production first.** When you draft notes for the release that introduces this cadence, include a short "Release cadence going forward" callout stating exactly that.
+
 ## Step 1: Ask which workflow
 
 > "Which release rung?
@@ -289,9 +301,9 @@ grep -vE $'\t(jackmusick|app/dependabot|app/renovate|github-actions\\[bot\\])\t'
 - ❌ Crediting only in the Contributors section without per-bullet `(#NN by @user)` markers. Readers scanning the feature list shouldn't have to scroll to find out who shipped it.
 - ❌ Putting external contributors as a footnote. They led the work — lead with their name on the bullet that describes it.
 
-### 2c. Bump the Claude plugin manifest (REQUIRED)
+### 2c. Bump the Claude and Codex plugin manifests (REQUIRED)
 
-Claude Code's plugin marketplace only fetches plugin updates when `.claude-plugin/plugin.json`'s `version` field changes on the default branch. Without this step, users installed via the bifrost plugin will keep getting the old skill content.
+Claude Code and Codex plugin marketplaces key installed plugin content by manifest `version`. Without this step, users installed via the bifrost plugin can keep getting old skill content even after the Git changes are merged.
 
 Run the helper, commit the bump to `main` via a normal PR, and merge it **before** tagging:
 
@@ -299,12 +311,12 @@ Run the helper, commit the bump to `main` via a normal PR, and merge it **before
 # <tag> is the version you're about to cut, e.g. v0.8.1 — strip the leading v.
 VERSION="${TAG#v}"
 ./scripts/update-plugin-version.sh "$VERSION"
-git add .claude-plugin/plugin.json
-git commit -m "chore(release): bump plugin manifest to $VERSION"
+git add .claude-plugin/plugin.json .codex-plugin/plugin.json plugins/bifrost/.codex-plugin/plugin.json
+git commit -m "chore(release): bump plugin manifests to $VERSION"
 # PR + merge via the normal flow, then continue.
 ```
 
-The tag-build CI job (`build-api`) has a hard guard that fails the release if the manifest version doesn't match the tag — so forgetting this step blocks the build, it doesn't silently ship stale skills.
+The tag-build CI job (`build-api`) has a hard guard that fails the release if any plugin manifest version doesn't match the tag — so forgetting this step blocks the build, it doesn't silently ship stale skills.
 
 **Trade-off:** between releases the manifest reflects the last tagged version, not the current dev commit. Per-push commit-back was considered and rejected — main has branch protection with required PR review and no ruleset bypass, so CI cannot push directly, and an auto-PR loop would churn the merge queue on every commit. See issue #245 and PR #246 for the full rationale.
 

@@ -11,7 +11,7 @@ import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from src.core.log_safety import log_safe
 from src.core.org_filter import OrgFilterType
@@ -115,10 +115,36 @@ class ApplicationRepository(OrgScopedRepository[Application]):
         return list(result.scalars().all())
 
     async def get_by_slug_global(self, slug: str) -> Application | None:
-        """Check if any application exists with this slug (globally unique)."""
-        query = select(self.model).where(self.model.slug == slug)
-        result = await self.session.execute(query)
-        return result.scalar_one_or_none()
+        """Resolve an app by slug for an admin, disambiguating by the active org.
+
+        Solution apps share a slug across orgs (criterion 9 — the same solution
+        installed for two orgs), so a bare ``scalar_one_or_none`` over the slug
+        would raise ``MultipleResultsFound`` for a platform admin (Codex R4).
+        Resolve like the user cascade does: prefer the row in the admin's active
+        org, then the global (NULL-org) row. Only genuinely undisambiguable when
+        two rows share BOTH slug and org — which the deploy-time collision guard
+        forbids — so we fall back to a deterministic pick rather than 500.
+        """
+        rows = list(
+            (
+                await self.session.execute(
+                    select(self.model).where(self.model.slug == slug)
+                )
+            ).scalars().all()
+        )
+        if not rows:
+            return None
+        if len(rows) == 1:
+            return rows[0]
+        if self.org_id is not None:
+            for r in rows:
+                if getattr(r, "organization_id", None) == self.org_id:
+                    return r
+        for r in rows:
+            if getattr(r, "organization_id", None) is None:
+                return r
+        # No org match and no global row — pick deterministically (stable order).
+        return sorted(rows, key=lambda r: str(r.id))[0]
 
     async def get_role_ids(self, app_id: UUID) -> list[UUID]:
         """Get list of role IDs assigned to an application."""
@@ -132,10 +158,33 @@ class ApplicationRepository(OrgScopedRepository[Application]):
         created_by: str,
     ) -> Application:
         """Create a new application with access control settings."""
-        # Check if application already exists in this scope
+        # Serialize against solution deploys of the same slug (deploy.py takes
+        # the same lock): both sides SELECT-then-INSERT into disjoint partial
+        # unique indexes, so a racing pair lands two same-slug rows and every
+        # subsequent open 500s with MultipleResultsFound.
+        await self.session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext('bifrost:appslug:' || :s))"),
+            {"s": data.slug},
+        )
         existing = await self.get_by_slug_global(data.slug)
         if existing:
             raise ValueError(f"Application with slug '{data.slug}' already exists")
+
+        # standalone_v2 apps render only from a built dist, and the ONLY thing
+        # that builds + serves that dist is a Solution deploy (deploy.py builds
+        # to _apps/{id}/). A bare `apps create` makes a LOOSE (non-solution) app
+        # — solution apps are created by deploy, not here — so a v2 app created
+        # this way could never render. Bark instead of silently making a dead
+        # app. v2 = a Solutions thing: scaffold with `bifrost solution
+        # scaffold-app` and deploy. inline_v1 is the standalone/legacy model.
+        if data.app_model == "standalone_v2":
+            raise ValueError(
+                "standalone_v2 apps live in a Solution (only a Solution deploy "
+                "builds + serves their dist). Create one with "
+                "`bifrost solution scaffold-app <slug>` inside a Solution "
+                "workspace, then `bifrost solution deploy`. To make a legacy "
+                "standalone app here, pass app_model='inline_v1' explicitly."
+            )
 
         application = Application(
             name=data.name,
@@ -145,6 +194,7 @@ class ApplicationRepository(OrgScopedRepository[Application]):
             organization_id=self.org_id,
             created_by=created_by,
             access_level=data.access_level,
+            app_model=data.app_model,
             repo_path=f"apps/{data.slug}",
         )
         self.session.add(application)
@@ -231,6 +281,74 @@ class ApplicationRepository(OrgScopedRepository[Application]):
 
         logger.info(f"Updated application '{log_safe(app_id)}'")
         return application
+
+    async def swap_slugs(self, app_a_id: UUID, app_b_id: UUID) -> tuple[Application, Application]:
+        """Atomically exchange two apps' slugs (v1→v2 migration cutover).
+
+        Locking order (Codex): lock by **app id** FIRST, then read the slugs
+        UNDER those locks, then lock the current slug strings too. Locking the
+        slug values without first serializing on app identity is unsafe — two
+        swaps that share an app (A↔B and A↔C) could each read A's slug before the
+        other commits, then lock stale slug strings that no longer cover A's
+        current slug and trip the unique index. The id locks (stable, sorted by
+        id to avoid deadlock) serialize any two swaps touching the same app; the
+        slug locks (the same ``bifrost:appslug:`` lock ``create``/deploy take)
+        serialize a swap against a same-slug deploy. Reading the slugs only after
+        the id locks means we never act on a slug another swap already moved.
+
+        The swap goes through a temporary placeholder slug on ``app_a`` to clear
+        the unique index before assigning ``app_a``'s old slug to ``app_b`` —
+        otherwise the two rows would momentarily share a slug and trip the
+        constraint at flush.
+
+        Both apps must exist and be visible in this repo's scope. Solution-managed
+        apps are rejected by the router guard before this is called (slug is a
+        deploy-owned property for those).
+        """
+        if app_a_id == app_b_id:
+            raise ValueError("Cannot swap an application's slug with itself")
+
+        # 1) Serialize on app IDENTITY first (stable key, sorted → no deadlock).
+        for aid in sorted((app_a_id, app_b_id), key=str):
+            await self.session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext('bifrost:appid:' || :s))"),
+                {"s": str(aid)},
+            )
+
+        # 2) Read the rows UNDER the id locks, so the slugs are current (a
+        #    concurrent swap sharing an app has already committed or is blocked).
+        app_a = await self.get(id=app_a_id)
+        app_b = await self.get(id=app_b_id)
+        if app_a is None or app_b is None:
+            missing = app_a_id if app_a is None else app_b_id
+            raise ValueError(f"Application '{missing}' not found")
+
+        slug_a, slug_b = app_a.slug, app_b.slug
+        # 3) Also lock the current slug strings, to serialize against a same-slug
+        #    create/deploy (which lock on this exact key).
+        for slug in sorted((slug_a, slug_b)):
+            await self.session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext('bifrost:appslug:' || :s))"),
+                {"s": slug},
+            )
+
+        # A placeholder slug that can't collide with a real one (slugs are
+        # lowercase kebab; the leading marker + app id keeps it globally unique).
+        placeholder = f"__swap-{app_a.id}"
+        app_a.slug = placeholder
+        await self.session.flush()
+        app_b.slug = slug_a
+        await self.session.flush()
+        app_a.slug = slug_b
+        await self.session.flush()
+
+        await self.session.refresh(app_a)
+        await self.session.refresh(app_b)
+        logger.info(
+            f"Swapped slugs: app {log_safe(app_a.id)} now '{log_safe(app_a.slug)}', "
+            f"app {log_safe(app_b.id)} now '{log_safe(app_b.slug)}'"
+        )
+        return app_a, app_b
 
     async def replace_application(
         self,

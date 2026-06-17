@@ -12,7 +12,11 @@ or cosmetic changes do NOT bump it. The tripwire in
 """
 
 #: Breaking-change counter for the CLI <-> server contract. See module docstring.
-CONTRACT_VERSION: int = 1
+# v2: claims organization_id widened to nullable for global/solution-managed claims (2026-06-13)
+# v4: unified --org standard — SolutionCreate/SolutionBase drop `scope` (install
+#     kind is derived from organization_id); SolutionRepoPreviewRequest gains
+#     organization_id; descriptor no longer carries scope (2026-06-15)
+CONTRACT_VERSION: int = 4
 
 
 def get_contract_version() -> int:

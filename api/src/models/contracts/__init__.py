@@ -482,7 +482,6 @@ from src.models.contracts.integrations import (
     MappingAuthorizeRequest,
     MappingAuthorizeResponse,
     OAuthConfigSummary,
-    IntegrationSDKResponse,  # For API SDK endpoint responses (no decrypted tokens)
     IntegrationTestRequest,
     IntegrationTestResponse,
 )
@@ -964,7 +963,6 @@ __all__ = [
     "MappingAuthorizeRequest",
     "MappingAuthorizeResponse",
     "IntegrationData",
-    "IntegrationSDKResponse",
     "IntegrationTestRequest",
     "IntegrationTestResponse",
     "OAuthConfigSummary",

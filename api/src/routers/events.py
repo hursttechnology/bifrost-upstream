@@ -398,12 +398,20 @@ async def create_source(
                 detail=str(exc),
             )
 
+    # Org targeting follows the unified --org standard: an OMITTED
+    # organization_id (HOME) defaults to the caller's org, so a bare create
+    # never silently writes a global row. Explicit null still means global.
+    if "organization_id" in request.model_fields_set:
+        target_org_id = request.organization_id
+    else:
+        target_org_id = ctx.org_id
+
     # Create base event source
     source = EventSource(
         name=request.name,
         source_type=request.source_type,
         event_type=request.event_type if request.source_type == EventSourceType.TOPIC else None,
-        organization_id=request.organization_id,
+        organization_id=target_org_id,
         is_active=True,
         created_by=ctx.user.email,
         created_at=now,
@@ -562,6 +570,13 @@ async def update_source(
             detail="Event source not found",
         )
 
+    # Solution-managed triggers are deploy-owned and read-only on the platform
+    # (the deploy path is the only writer). Refuse with a clean 409 before
+    # mutating, rather than letting the before_flush backstop raise a 500.
+    from src.services.solutions.guard import assert_not_solution_managed
+
+    assert_not_solution_managed(source)
+
     # Update basic fields
     if request.name is not None:
         source.name = request.name
@@ -655,6 +670,13 @@ async def delete_source(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Event source not found",
         )
+
+    # Solution-managed triggers are deploy-owned — uninstall removes them, not
+    # this endpoint. Refuse with a clean 409 (the DELETE cascade would otherwise
+    # strip a managed source's deploy-owned rows outside deploy).
+    from src.services.solutions.guard import assert_not_solution_managed
+
+    assert_not_solution_managed(source)
 
     # Call adapter unsubscribe for webhooks
     if source.source_type == EventSourceType.WEBHOOK and source.webhook_source:
@@ -827,6 +849,11 @@ async def update_subscription(
             detail="Subscription not found",
         )
 
+    # Solution-managed subscriptions are deploy-owned, read-only here.
+    from src.services.solutions.guard import assert_not_solution_managed
+
+    assert_not_solution_managed(subscription)
+
     # Update fields - use model_fields_set to distinguish "not provided" from "set to null"
     if "event_type" in request.model_fields_set:
         subscription.event_type = request.event_type
@@ -884,6 +911,11 @@ async def delete_subscription(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Subscription not found",
         )
+
+    # Solution-managed subscriptions are deploy-owned, read-only here.
+    from src.services.solutions.guard import assert_not_solution_managed
+
+    assert_not_solution_managed(subscription)
 
     await db.delete(subscription)
     await db.flush()

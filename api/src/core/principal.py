@@ -9,6 +9,13 @@ tests/unit/test_import_hygiene.py enforces this.
 from dataclasses import dataclass, field
 from uuid import UUID
 
+# Role names that grant platform-admin-equivalent privileges to a non-superuser
+# user. Used by the agents domain (agent_runs/agents/agent_tuning) to admit
+# role-based admins in addition to token superusers. The canonical
+# ``is_platform_admin`` property stays narrower (superuser-only) on purpose —
+# see api/src/repositories/README.md.
+PLATFORM_ADMIN_ROLE_NAMES = ("Platform Admin", "Platform Owner")
+
 
 @dataclass
 class UserPrincipal:
@@ -31,6 +38,12 @@ class UserPrincipal:
     is_active: bool = True
     is_superuser: bool = False
     is_verified: bool = False
+    # External (portal/guest) principal. Enforced at the access-level gate
+    # only: excluded from access_level="authenticated" entities, admitted by
+    # "everyone" and by explicit role grants. Org→global cascade is unchanged.
+    # The claim is minted already neutralized for bypass callers (platform
+    # admin / provider org) — see shared/external_access.py.
+    is_external: bool = False
     roles: list[str] = field(default_factory=list)
     # Role identity used by table-policy `has_role` evaluator. Populated by
     # `get_execution_context` from the `user_roles` table; empty for token-only
@@ -60,3 +73,12 @@ class UserPrincipal:
     def has_any_role(self, *roles: str) -> bool:
         """Check if user has any of the specified roles."""
         return any(role in self.roles for role in roles)
+
+    def has_platform_admin_grant(self) -> bool:
+        """True if a token superuser OR a holder of a platform-admin role.
+
+        Broader than ``is_platform_admin`` (which is superuser-only): this
+        also admits users granted a ``PLATFORM_ADMIN_ROLE_NAMES`` role. Used
+        by the agents domain for its admin gates.
+        """
+        return bool(self.is_superuser) or self.has_any_role(*PLATFORM_ADMIN_ROLE_NAMES)

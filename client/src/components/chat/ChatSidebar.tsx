@@ -70,6 +70,7 @@ import {
 } from "@/hooks/useChat";
 import { exportConversation } from "@/services/chatExport";
 import { ArtifactsPanel } from "@/components/chat/ArtifactsPanel";
+import { ToolboxPanel } from "@/components/chat/ToolboxPanel";
 import type { ConversationSummary } from "@/hooks/useChat";
 import { cn } from "@/lib/utils";
 import {
@@ -196,6 +197,8 @@ export function ChatSidebar({
 	const renameIntent = useRef<string | null>(null);
 	// Artifacts panel (lists every artifact in the active conversation).
 	const [artifactsOpen, setArtifactsOpen] = useState(false);
+	// Toolbox panel (the active agent's capabilities for this conversation).
+	const [toolboxOpen, setToolboxOpen] = useState(false);
 
 	const { activeConversationId, setActiveConversation, setActiveAgent } =
 		useChatStore();
@@ -442,22 +445,14 @@ export function ChatSidebar({
 						</button>
 					)}
 
-					<Tooltip>
-						<TooltipTrigger asChild>
-							<button
-								type="button"
-								disabled
-								className={cn(
-									navRowClass,
-									"opacity-50 cursor-not-allowed hover:bg-transparent",
-								)}
-							>
-								<Hammer className="h-4 w-4" />
-								<span>Toolbox</span>
-							</button>
-						</TooltipTrigger>
-						<TooltipContent>Coming soon</TooltipContent>
-					</Tooltip>
+					<button
+						type="button"
+						onClick={() => setToolboxOpen(true)}
+						className={navRowClass}
+					>
+						<Hammer className="h-4 w-4" />
+						<span>Toolbox</span>
+					</button>
 					<button
 						type="button"
 						onClick={() => setArtifactsOpen(true)}
@@ -691,6 +686,12 @@ export function ChatSidebar({
 					conversationId={activeConversationId ?? undefined}
 					open={artifactsOpen}
 					onOpenChange={setArtifactsOpen}
+				/>
+
+				<ToolboxPanel
+					conversationId={activeConversationId ?? undefined}
+					open={toolboxOpen}
+					onOpenChange={setToolboxOpen}
 				/>
 
 				<AlertDialog

@@ -328,6 +328,12 @@ class AgentExecutor:
                 if agent
                 else []
             )
+            # Workspace tool intersection (chat-ux-design §2.4): a workspace may
+            # restrict (never expand) the agent's WORKFLOW tools. System tools,
+            # delegation, and MCP are not workspace-gated in v1.
+            tool_definitions = await self._apply_workspace_tool_intersection(
+                tool_definitions, conversation
+            )
             logger.info(f"Agent '{agent.name if agent else 'None'}' has {len(tool_definitions)} tool definitions")
             if tool_definitions:
                 logger.debug(f"Tools: {[t.name for t in tool_definitions]}")
@@ -807,6 +813,55 @@ IMPORTANT: When the user's request can be fulfilled using one of your tools, you
                 agent, session, caller_user_id=caller_user_id
             )
         return tools
+
+    async def _apply_workspace_tool_intersection(
+        self,
+        tool_definitions: list[ToolDefinition],
+        conversation: Conversation,
+    ) -> list[ToolDefinition]:
+        """Restrict WORKFLOW tools to the conversation workspace's allowlist.
+
+        Implements chat-ux-design §2.4: ``effective = agent.tool_ids ∩
+        workspace.enabled_tool_ids``. A workspace can restrict but never expand
+        the agent's tools. Only workflow tools (those with a workflow id in
+        ``self._tool_workflow_id_map``) are gated — system tools, delegation, and
+        MCP pass through untouched. No workspace, or a workspace with
+        ``enabled_tool_ids is None``, is a pass-through.
+        """
+        if conversation.workspace_id is None or not tool_definitions:
+            return tool_definitions
+
+        async with self._db() as session:
+            workspace = await session.get(Workspace, conversation.workspace_id)
+
+        if workspace is None or workspace.enabled_tool_ids is None:
+            return tool_definitions
+
+        from src.services.workspace_service import effective_tool_ids
+
+        # The id map also carries MCP connection ids (names prefixed ``mcp__``);
+        # those are NOT workflow tools and are not workspace-gated. Build the
+        # agent's workflow-id set from non-MCP entries only.
+        id_map = self._tool_workflow_id_map or {}
+        agent_workflow_ids = [
+            str(wid) for name, wid in id_map.items() if not name.startswith("mcp__")
+        ]
+        allowed = set(effective_tool_ids(agent_workflow_ids, workspace))
+
+        filtered: list[ToolDefinition] = []
+        for tool in tool_definitions:
+            wid = id_map.get(tool.name)
+            # Gate ONLY workflow tools: a tool with a workflow id that isn't an
+            # MCP tool. System tools (no id), delegation, and MCP pass through.
+            is_workflow_tool = wid is not None and not tool.name.startswith("mcp__")
+            if not is_workflow_tool or str(wid) in allowed:
+                filtered.append(tool)
+            else:
+                logger.debug(
+                    "Workspace %s hides workflow tool '%s' (not in enabled_tool_ids)",
+                    conversation.workspace_id, tool.name,
+                )
+        return filtered
 
     async def _notify_tool_conflicts(
         self,

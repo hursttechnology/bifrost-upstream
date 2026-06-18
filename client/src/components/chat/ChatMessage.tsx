@@ -281,10 +281,16 @@ export function ChatMessage({
 		);
 	}
 
-	// Assistant message - full markdown rendering
+	// Assistant message - leading avatar + flush markdown (Claude-style: anchored
+	// by an avatar rather than wrapped in a competing bubble like the user turn).
 	return (
 		<div className={cn("py-3 px-4 group", isStreaming && "animate-pulse")}>
-			<div className="max-w-4xl">
+			<div className="flex gap-3 max-w-4xl">
+				{/* Assistant avatar — anchors the turn against the user's bubble */}
+				<div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground mt-0.5">
+					<Bot className="size-4" />
+				</div>
+				<div className="min-w-0 flex-1">
 				{/* Markdown Content */}
 				<div className="prose prose-slate dark:prose-invert max-w-none prose-p:my-2 prose-p:leading-7 prose-headings:font-semibold prose-h1:text-xl prose-h2:text-lg prose-h3:text-base prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-pre:my-2 prose-pre:p-0 prose-pre:bg-transparent">
 					<ReactMarkdown
@@ -429,6 +435,7 @@ export function ChatMessage({
 						</div>
 					</div>
 				)}
+				</div>
 			</div>
 		</div>
 	);

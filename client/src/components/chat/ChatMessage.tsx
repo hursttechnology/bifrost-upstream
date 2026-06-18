@@ -6,19 +6,23 @@
  * Supports full markdown rendering for AI responses.
  */
 
+import { useState } from "react";
 import {
 	Bot,
+	ChevronDown,
 	FileImage,
 	FileSpreadsheet,
 	FileText,
 	Gauge,
 	Gem,
+	Sparkles,
 	Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { components } from "@/lib/v1";
 import { isImageAttachment } from "@/services/chatAttachments";
+import { ArtifactRenderer } from "@/components/chat/ArtifactRenderer";
 import {
 	COST_TIER_LABEL,
 	type CostTier,
@@ -37,6 +41,81 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 
 type MessagePublic = components["schemas"]["MessagePublic"];
 type AttachmentPublic = components["schemas"]["AttachmentPublic"];
+type ArtifactInfo = components["schemas"]["ArtifactInfo"];
+
+/**
+ * Compact, collapsible card for one generated artifact, shown below the message
+ * content. Mirrors the MessageAttachments / DelegationBadge affordance: a
+ * Sparkles-iconed header that toggles an inline ArtifactRenderer preview.
+ */
+function ArtifactCard({
+	artifact,
+	conversationId,
+}: {
+	artifact: ArtifactInfo;
+	conversationId: string;
+}) {
+	const [isOpen, setIsOpen] = useState(false);
+	const title =
+		artifact.title ||
+		artifact.files?.[0]?.filename ||
+		"Artifact";
+
+	return (
+		<div className="rounded-lg border border-border bg-card/50 overflow-hidden">
+			<button
+				type="button"
+				onClick={() => setIsOpen((o) => !o)}
+				aria-expanded={isOpen}
+				className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent"
+			>
+				<Sparkles className="h-4 w-4 shrink-0 text-primary" />
+				<span className="min-w-0 flex-1 truncate font-medium" title={title}>
+					{title}
+				</span>
+				<span className="shrink-0 text-xs text-muted-foreground">
+					{isOpen ? "Hide" : "Open in panel"}
+				</span>
+				<ChevronDown
+					className={cn(
+						"h-4 w-4 shrink-0 text-muted-foreground transition-transform",
+						isOpen && "rotate-180",
+					)}
+				/>
+			</button>
+			{isOpen && (
+				<div className="border-t border-border p-3">
+					<ArtifactRenderer
+						artifact={artifact}
+						conversationId={conversationId}
+					/>
+				</div>
+			)}
+		</div>
+	);
+}
+
+/** Renders the collapsible cards for a message's generated artifacts. */
+function MessageArtifacts({
+	artifacts,
+	conversationId,
+}: {
+	artifacts: ArtifactInfo[];
+	conversationId: string;
+}) {
+	if (artifacts.length === 0) return null;
+	return (
+		<div className="mt-3 space-y-2">
+			{artifacts.map((artifact, i) => (
+				<ArtifactCard
+					key={i}
+					artifact={artifact}
+					conversationId={conversationId}
+				/>
+			))}
+		</div>
+	);
+}
 
 function attachmentIcon(contentType: string) {
 	if (isImageAttachment(contentType)) return FileImage;
@@ -196,6 +275,10 @@ export function ChatMessage({
 	isStreaming,
 }: ChatMessageProps) {
 	const isUser = message.role === "user";
+	const artifacts = message.artifacts ?? [];
+	// Download URLs are minted against the owning conversation; the message
+	// always carries it.
+	const conversationId = message.conversation_id;
 
 	// User message - right-aligned bubble with markdown rendering
 	if (isUser) {
@@ -276,6 +359,10 @@ export function ChatMessage({
 							{preprocessMentions(message.content || "")}
 						</ReactMarkdown>
 					</div>
+					<MessageArtifacts
+						artifacts={artifacts}
+						conversationId={conversationId}
+					/>
 				</div>
 			</div>
 		);
@@ -435,6 +522,11 @@ export function ChatMessage({
 						</div>
 					</div>
 				)}
+
+				<MessageArtifacts
+					artifacts={artifacts}
+					conversationId={conversationId}
+				/>
 				</div>
 			</div>
 		</div>

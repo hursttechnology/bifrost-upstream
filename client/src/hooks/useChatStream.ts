@@ -426,6 +426,29 @@ export function useChatStream({
 					break;
 				}
 
+				// Artifacts (sub-project 4). A generated artifact is appended to
+				// its target message's artifacts list so the transcript renders
+				// the inline card and the Artifacts panel can enumerate it.
+				case "artifact_generated": {
+					const convId = currentConversationIdRef.current;
+					if (convId && chunk.message_id && chunk.artifact) {
+						const messages =
+							useChatStore.getState().messagesByConversation[
+								convId
+							] || [];
+						const target = messages.find(
+							(m) => m.id === chunk.message_id,
+						);
+						const existing = target?.artifacts ?? [];
+						useChatStore
+							.getState()
+							.updateMessage(convId, chunk.message_id, {
+								artifacts: [...existing, chunk.artifact],
+							});
+					}
+					break;
+				}
+
 				case "error": {
 					const errorMsg = chunk.error || "Unknown error occurred";
 					setStreamError(errorMsg);

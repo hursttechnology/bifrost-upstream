@@ -44,6 +44,8 @@ vi.mock("@/hooks/useChat", () => ({
 		mutate: mockUpdateMutate,
 		isPending: false,
 	}),
+	// The Artifacts panel (mounted but closed by default) reads messages.
+	useMessages: () => ({ data: [], isLoading: false }),
 }));
 
 const mockExportConversation = vi.fn(

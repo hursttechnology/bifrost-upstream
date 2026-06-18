@@ -321,7 +321,8 @@ export interface ChatStreamChunk {
 		| "compaction_started"
 		| "compaction_complete"
 		| "delegation_started"
-		| "delegation_complete";
+		| "delegation_complete"
+		| "artifact_generated";
 	conversation_id?: string;
 	content?: string | null;
 	tool_call?: ChatToolCall | null;
@@ -359,6 +360,9 @@ export interface ChatStreamChunk {
 	// M6 multi-agent delegation. Carried by delegation_started (response unset)
 	// and delegation_complete (response/error populated) chunks.
 	delegation?: ChatDelegationInfo | null;
+	// Artifacts (sub-project 4). Carried by artifact_generated; references the
+	// target message via message_id and appends to its artifacts list.
+	artifact?: components["schemas"]["ArtifactInfo"] | null;
 }
 
 export interface ChatDelegationInfo {
@@ -963,6 +967,7 @@ class WebSocketService {
 			case "compaction_complete":
 			case "delegation_started":
 			case "delegation_complete":
+			case "artifact_generated":
 				this.dispatchChatStreamChunk(message as ChatStreamChunk);
 				break;
 

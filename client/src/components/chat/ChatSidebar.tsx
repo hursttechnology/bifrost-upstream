@@ -2,7 +2,8 @@
  * ChatSidebar Component
  *
  * Primary nav stays put: + New chat, Workspaces, Toolbox (placeholder),
- * Artifacts (placeholder). When a workspace is active the `Workspaces` row
+ * Artifacts (opens the per-conversation artifacts panel). When a workspace is
+ * active the `Workspaces` row
  * swaps for a workspace-identity row with an exit `×` and a settings gear.
  *
  * Recent shows:
@@ -68,6 +69,7 @@ import {
 	useUpdateConversation,
 } from "@/hooks/useChat";
 import { exportConversation } from "@/services/chatExport";
+import { ArtifactsPanel } from "@/components/chat/ArtifactsPanel";
 import type { ConversationSummary } from "@/hooks/useChat";
 import { cn } from "@/lib/utils";
 import {
@@ -192,6 +194,8 @@ export function ChatSidebar({
 	// Set when Rename is chosen so the dropdown's onCloseAutoFocus can suppress
 	// Radix's focus-restore (which would otherwise blur-cancel the new editor).
 	const renameIntent = useRef<string | null>(null);
+	// Artifacts panel (lists every artifact in the active conversation).
+	const [artifactsOpen, setArtifactsOpen] = useState(false);
 
 	const { activeConversationId, setActiveConversation, setActiveAgent } =
 		useChatStore();
@@ -454,22 +458,14 @@ export function ChatSidebar({
 						</TooltipTrigger>
 						<TooltipContent>Coming soon</TooltipContent>
 					</Tooltip>
-					<Tooltip>
-						<TooltipTrigger asChild>
-							<button
-								type="button"
-								disabled
-								className={cn(
-									navRowClass,
-									"opacity-50 cursor-not-allowed hover:bg-transparent",
-								)}
-							>
-								<Sparkles className="h-4 w-4" />
-								<span>Artifacts</span>
-							</button>
-						</TooltipTrigger>
-						<TooltipContent>Coming soon</TooltipContent>
-					</Tooltip>
+					<button
+						type="button"
+						onClick={() => setArtifactsOpen(true)}
+						className={navRowClass}
+					>
+						<Sparkles className="h-4 w-4" />
+						<span>Artifacts</span>
+					</button>
 				</div>
 
 				{/* === Search ================================================ */}
@@ -690,6 +686,12 @@ export function ChatSidebar({
 						</p>
 					)}
 				</div>
+
+				<ArtifactsPanel
+					conversationId={activeConversationId ?? undefined}
+					open={artifactsOpen}
+					onOpenChange={setArtifactsOpen}
+				/>
 
 				<AlertDialog
 					open={!!deleteTarget}

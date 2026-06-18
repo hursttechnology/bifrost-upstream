@@ -12,6 +12,30 @@ import pytest
 logger = logging.getLogger(__name__)
 
 
+def _run_seed(coro_factory):
+    """Run an async DB-seed coroutine in a dedicated loop, disposing the engine
+    inside that loop so asyncpg's pooled connections close before the loop ends.
+
+    ``asyncio.run`` leaves the shared async engine's pool holding connections
+    bound to a loop it then closes, which raises 'Event loop is closed' on GC.
+    """
+    import asyncio
+
+    from src.core.database import get_engine
+
+    loop = asyncio.new_event_loop()
+    try:
+        async def _wrapped():
+            try:
+                return await coro_factory()
+            finally:
+                await get_engine().dispose()
+
+        return loop.run_until_complete(_wrapped())
+    finally:
+        loop.close()
+
+
 # =============================================================================
 # Conversation CRUD Tests
 # =============================================================================
@@ -663,6 +687,170 @@ class TestAttachments:
             if a["id"] == attachment_id
         ]
         assert bound, "attachment was not bound to the user message"
+
+
+class TestArtifactDownload:
+    """The render-time signed-URL download endpoint for tool-produced artifacts."""
+
+    def test_download_nonexistent_artifact_is_404(
+        self,
+        e2e_client,
+        platform_admin,
+        test_conversation,
+    ):
+        """A missing artifact id (in an owned conversation) returns 404."""
+        import uuid
+
+        resp = e2e_client.get(
+            f"/api/chat/conversations/{test_conversation['id']}"
+            f"/artifacts/{uuid.uuid4()}/download",
+            headers=platform_admin.headers,
+        )
+        assert resp.status_code == 404, resp.text
+
+    def test_download_in_unowned_conversation_is_404(
+        self,
+        e2e_client,
+        platform_admin,
+    ):
+        """Downloading from a conversation the user doesn't own returns 404."""
+        import uuid
+
+        resp = e2e_client.get(
+            f"/api/chat/conversations/{uuid.uuid4()}"
+            f"/artifacts/{uuid.uuid4()}/download",
+            headers=platform_admin.headers,
+        )
+        assert resp.status_code == 404, resp.text
+
+    def test_persist_then_download_mints_url(
+        self,
+        e2e_client,
+        platform_admin,
+        test_conversation,
+    ):
+        """Persisting an artifact via the service then hitting the endpoint mints
+        a scoped, expiring download URL (real S3 write + presign in the stack)."""
+        import base64
+        import uuid
+
+        from src.core.database import get_session_factory
+        from src.models.contracts.agents import ArtifactToolContract
+        from src.models.enums import MessageRole
+        from src.models.orm import Message
+        from src.services.artifacts import ArtifactService
+
+        conversation_id = uuid.UUID(test_conversation["id"])
+
+        async def _seed() -> str:
+            async with get_session_factory()() as session:
+                # An artifact must hang off a real message in the conversation.
+                msg = Message(
+                    id=uuid.uuid4(),
+                    conversation_id=conversation_id,
+                    role=MessageRole.ASSISTANT,
+                    content="here is your report",
+                    sequence=999,
+                )
+                session.add(msg)
+                await session.flush()
+                contract = ArtifactToolContract.model_validate(
+                    {
+                        "title": "Report",
+                        "preview": {"kind": "markdown", "inline": "# Report"},
+                        "files": [
+                            {
+                                "name": "report.md",
+                                "content_type": "text/markdown",
+                                "content_base64": base64.b64encode(b"# Report\n\nbody").decode(),
+                            }
+                        ],
+                    }
+                )
+                info = await ArtifactService(session).persist(
+                    contract=contract,
+                    conversation_id=conversation_id,
+                    message_id=msg.id,
+                )
+                await session.commit()
+                return str(info.files[0].id)
+
+        artifact_file_id = _run_seed(_seed)
+
+        resp = e2e_client.get(
+            f"/api/chat/conversations/{conversation_id}"
+            f"/artifacts/{artifact_file_id}/download",
+            headers=platform_admin.headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["url"].startswith("http")
+        assert data["expires_in"] > 0
+
+    def test_artifact_appears_on_message(
+        self,
+        e2e_client,
+        platform_admin,
+        test_conversation,
+    ):
+        """A persisted artifact is returned on the owning message via get_messages."""
+        import base64
+        import uuid
+
+        from src.core.database import get_session_factory
+        from src.models.contracts.agents import ArtifactToolContract
+        from src.models.enums import MessageRole
+        from src.models.orm import Message
+        from src.services.artifacts import ArtifactService
+
+        conversation_id = uuid.UUID(test_conversation["id"])
+
+        async def _seed() -> str:
+            async with get_session_factory()() as session:
+                msg = Message(
+                    id=uuid.uuid4(),
+                    conversation_id=conversation_id,
+                    role=MessageRole.ASSISTANT,
+                    content="report attached",
+                    sequence=1000,
+                )
+                session.add(msg)
+                await session.flush()
+                contract = ArtifactToolContract.model_validate(
+                    {
+                        "title": "Chart",
+                        "preview": {"kind": "markdown", "inline": "# Chart"},
+                        "files": [
+                            {
+                                "name": "chart.md",
+                                "content_type": "text/markdown",
+                                "content_base64": base64.b64encode(b"# Chart").decode(),
+                            }
+                        ],
+                    }
+                )
+                await ArtifactService(session).persist(
+                    contract=contract,
+                    conversation_id=conversation_id,
+                    message_id=msg.id,
+                )
+                await session.commit()
+                return str(msg.id)
+
+        message_id = _run_seed(_seed)
+
+        msgs = e2e_client.get(
+            f"/api/chat/conversations/{conversation_id}/messages",
+            headers=platform_admin.headers,
+        )
+        assert msgs.status_code == 200, msgs.text
+        target = [m for m in msgs.json() if m["id"] == message_id]
+        assert target, "seeded message not found"
+        artifacts = target[0].get("artifacts", [])
+        assert artifacts, "artifact not present on message"
+        assert artifacts[0]["title"] == "Chart"
+        assert artifacts[0]["preview"]["kind"] == "markdown"
+        assert artifacts[0]["files"][0]["filename"] == "chart.md"
 
 
 # =============================================================================

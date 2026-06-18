@@ -117,15 +117,31 @@ function RenameInput({
 	const ready = useRef(false);
 
 	useEffect(() => {
-		const raf = requestAnimationFrame(() => {
-			ref.current?.focus();
-			ref.current?.select();
-			// Arm blur-to-cancel only AFTER the focus (and any synchronous
-			// mount-time focusout) has settled, on the next tick.
+		// The editor mounts as the dropdown menu closes. Radix restores focus
+		// to the (now-unmounted) trigger during its close, which steals focus
+		// from us on the first attempt — so re-assert focus across a few frames
+		// until it lands, then arm blur-to-cancel. Without the retry the input
+		// mounts but never holds focus (jsdom doesn't reproduce this race, so
+		// the unit test can't catch it — verified in a real browser).
+		let frame = 0;
+		let raf = 0;
+		const tryFocus = () => {
+			const el = ref.current;
+			if (!el) return;
+			if (document.activeElement !== el && frame < 10) {
+				el.focus();
+				el.select();
+				frame += 1;
+				raf = requestAnimationFrame(tryFocus);
+				return;
+			}
+			// Focus has landed (or we gave up gracefully); arm blur-to-cancel
+			// on the next tick so the close-race focusout doesn't trip it.
 			setTimeout(() => {
 				ready.current = true;
 			}, 0);
-		});
+		};
+		raf = requestAnimationFrame(tryFocus);
 		return () => cancelAnimationFrame(raf);
 	}, []);
 
@@ -173,6 +189,9 @@ export function ChatSidebar({
 	// Inline rename (§8.1): the id currently being renamed (draft lives in
 	// the RenameInput child).
 	const [renamingId, setRenamingId] = useState<string | null>(null);
+	// Set when Rename is chosen so the dropdown's onCloseAutoFocus can suppress
+	// Radix's focus-restore (which would otherwise blur-cancel the new editor).
+	const renameIntent = useRef<string | null>(null);
 
 	const { activeConversationId, setActiveConversation, setActiveAgent } =
 		useChatStore();
@@ -543,11 +562,27 @@ export function ChatSidebar({
 										<DropdownMenuContent
 											align="end"
 											onClick={(e) => e.stopPropagation()}
+											onCloseAutoFocus={(e) => {
+												// Mount the inline editor only AFTER the menu has fully
+												// closed (its dismiss overlay is gone) — otherwise the
+												// editor mounts under the lingering overlay, which
+												// intercepts pointer/focus and the field never sticks.
+												// We also prevent Radix's default focus-restore to the
+												// trigger so the editor's own focus wins. (jsdom can't
+												// reproduce this overlay/focus race; verified live.)
+												if (renameIntent.current === conv.id) {
+													e.preventDefault();
+													renameIntent.current = null;
+													setRenamingId(conv.id);
+												}
+											}}
 										>
 											<DropdownMenuItem
-												onClick={() =>
-													setRenamingId(conv.id)
-												}
+												onSelect={() => {
+													// Defer the actual rename to onCloseAutoFocus (above)
+													// so the menu closes cleanly first.
+													renameIntent.current = conv.id;
+												}}
 											>
 												<Pencil className="h-3.5 w-3.5 mr-2" />
 												Rename

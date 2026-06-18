@@ -164,7 +164,7 @@ EXPECTED_CONTRACT_FINGERPRINT = (
     # optional `turns_compacted`, and CompactConversationResponse was added. ADDITIVE
     # (streaming chat chunks the CLI doesn't parse; new optional field) — fingerprint
     # refreshed after merge with main, no further CONTRACT_VERSION bump.
-    "MERGE_PLACEHOLDER_RECOMPUTE"
+    "c1acd43715b016631834114da5a449592df70af436ae06dce6a8a33bb1fbd588"
 )
 
 

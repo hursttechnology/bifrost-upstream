@@ -10849,6 +10849,11 @@ export interface components {
              * @default false
              */
             has_extracted_text: boolean;
+            /**
+             * Token Estimate
+             * @description Rough token count of the extracted text, for the composer's pre-send cost hint (§16.8). None for images.
+             */
+            token_estimate?: number | null;
         };
         /**
          * AttachmentUploadResponse

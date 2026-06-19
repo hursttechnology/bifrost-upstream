@@ -34,6 +34,11 @@ MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB per file
 MAX_FILES_PER_MESSAGE = 5
 # Per-conversation total cap. Org-configurable; this is the default (spec §3.2).
 DEFAULT_CONVERSATION_TOTAL_BYTES = 500 * 1024 * 1024  # 500 MB
+# Org-settings key that overrides the per-conversation cap above.
+ORG_SETTINGS_LIMIT_KEY = "max_attachment_bytes_per_conversation"
+
+# Rough chars-per-token ratio for the composer's pre-send cost hint (§16.8).
+_CHARS_PER_TOKEN = 4
 
 # Supported content types (spec §3.1).
 IMAGE_CONTENT_TYPES = {
@@ -109,6 +114,20 @@ class AttachmentService:
     ) -> None:
         self.db = db
         self.conversation_total_cap_bytes = conversation_total_cap_bytes
+
+    @staticmethod
+    def conversation_byte_limit(org_settings: dict | None) -> int:
+        """Per-conversation total-bytes cap, honoring an org-settings override.
+
+        Returns the org's ``max_attachment_bytes_per_conversation`` when it is a
+        positive int, else the platform default. Callers resolve this from the
+        org's settings and pass it as ``conversation_total_cap_bytes``.
+        """
+        if org_settings:
+            override = org_settings.get(ORG_SETTINGS_LIMIT_KEY)
+            if isinstance(override, int) and override > 0:
+                return override
+        return DEFAULT_CONVERSATION_TOTAL_BYTES
 
     # ------------------------------------------------------------------ #
     # Validation
@@ -359,6 +378,17 @@ async def get_conversation_or_none(
         .where(Conversation.user_id == user_id)
     )
     return result.scalar_one_or_none()
+
+
+def estimate_tokens(text: str | None) -> int | None:
+    """Rough token estimate for the composer chip's pre-send cost hint (§16.8).
+
+    Approximate (``len // 4``); None for empty/missing text. Used to surface
+    "~N tokens" before send, not for billing.
+    """
+    if not text:
+        return None
+    return max(1, len(text) // _CHARS_PER_TOKEN)
 
 
 async def load_message_attachments(

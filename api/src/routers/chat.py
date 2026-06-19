@@ -592,7 +592,15 @@ async def upload_attachments(
             detail=f"Too many files. Maximum is {MAX_FILES_PER_MESSAGE} per message.",
         )
 
-    service = AttachmentService(db)
+    # Resolve the per-conversation byte cap, honoring an org-settings override.
+    from src.models.orm import Organization
+
+    org_settings: dict | None = None
+    if user.organization_id is not None:
+        org = await db.get(Organization, user.organization_id)
+        org_settings = org.settings if org is not None else None
+    cap = AttachmentService.conversation_byte_limit(org_settings)
+    service = AttachmentService(db, conversation_total_cap_bytes=cap)
     stored: list[MessageAttachment] = []
     try:
         for f in files:

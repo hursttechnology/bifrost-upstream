@@ -12,16 +12,54 @@ import pytest
 
 from src.models.orm import MessageAttachment
 from src.services.attachments import (
+    DEFAULT_CONVERSATION_TOTAL_BYTES,
     MAX_FILE_SIZE_BYTES,
     MAX_FILES_PER_MESSAGE,
+    ORG_SETTINGS_LIMIT_KEY,
     AttachmentError,
     AttachmentService,
+    estimate_tokens,
     is_image,
 )
 
 
 def _svc(db=None) -> AttachmentService:
     return AttachmentService(db or AsyncMock())
+
+
+# --------------------------------------------------------------------------- #
+# Org-configurable conversation byte limit
+# --------------------------------------------------------------------------- #
+
+
+def test_conversation_byte_limit_default():
+    assert AttachmentService.conversation_byte_limit(None) == DEFAULT_CONVERSATION_TOTAL_BYTES
+    assert AttachmentService.conversation_byte_limit({}) == DEFAULT_CONVERSATION_TOTAL_BYTES
+
+
+def test_conversation_byte_limit_org_override():
+    settings = {ORG_SETTINGS_LIMIT_KEY: 10 * 1024 * 1024}
+    assert AttachmentService.conversation_byte_limit(settings) == 10 * 1024 * 1024
+
+
+def test_conversation_byte_limit_ignores_invalid_override():
+    for bad in ({ORG_SETTINGS_LIMIT_KEY: -5}, {ORG_SETTINGS_LIMIT_KEY: 0}, {ORG_SETTINGS_LIMIT_KEY: "nope"}):
+        assert AttachmentService.conversation_byte_limit(bad) == DEFAULT_CONVERSATION_TOTAL_BYTES
+
+
+# --------------------------------------------------------------------------- #
+# Token estimate (composer cost hint, §16.8)
+# --------------------------------------------------------------------------- #
+
+
+def test_estimate_tokens_none_for_empty():
+    assert estimate_tokens(None) is None
+    assert estimate_tokens("") is None
+
+
+def test_estimate_tokens_rough_ratio():
+    assert estimate_tokens("a" * 400) == 100  # ~len/4
+    assert estimate_tokens("hi") == 1  # min 1 for any non-empty text
 
 
 # --------------------------------------------------------------------------- #

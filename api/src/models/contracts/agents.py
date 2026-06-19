@@ -357,6 +357,10 @@ class AttachmentPublic(BaseModel):
         default=False,
         description="True if server-side text was extracted (PDF/CSV/text). Images have none.",
     )
+    token_estimate: int | None = Field(
+        default=None,
+        description="Rough token count of the extracted text, for the composer's pre-send cost hint (§16.8). None for images.",
+    )
 
     @field_serializer("id")
     def serialize_id(self, v: UUID) -> str:
@@ -364,13 +368,16 @@ class AttachmentPublic(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _derive_has_extracted_text(cls, data):
-        """Derive has_extracted_text from the ORM's extracted_text column."""
+    def _derive_extracted_fields(cls, data):
+        """Derive has_extracted_text + token_estimate from the ORM's extracted_text."""
         if not isinstance(data, dict) and hasattr(data, "extracted_text"):
             try:
+                from src.services.attachments import estimate_tokens
+
                 data.has_extracted_text = bool(data.extracted_text)
+                data.token_estimate = estimate_tokens(data.extracted_text)
             except (AttributeError, ValueError):
-                pass  # detached instance — DTO default (False) applies
+                pass  # detached instance — DTO defaults apply
         return data
 
 

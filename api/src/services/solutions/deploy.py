@@ -624,8 +624,12 @@ class SolutionDeployer:
         """
         from src.services.manifest_import import _resolve_role_names
 
+        # role_names is authoritative when the key is PRESENT — including an
+        # explicit empty list, which means "no roles" and must NOT fall through to
+        # a stale `roles` UUID list (mirrors the git-sync B3 rule: present means
+        # authoritative). Only a truly ABSENT role_names defers to `roles`.
         role_names = entry.get("role_names")
-        if role_names:
+        if role_names is not None:
             return [
                 UUID(r)
                 for r in await _resolve_role_names(
@@ -756,6 +760,9 @@ class SolutionDeployer:
     async def _upsert_workflows(
         self, solution: Solution, workflows: list[dict[str, Any]]
     ) -> None:
+        from bifrost.manifest import ManifestWorkflow
+        from bifrost.manifest_codec import Destination
+
         sid = solution.id
         for mwf in workflows:
             wf_id = UUID(mwf["id"])
@@ -779,27 +786,13 @@ class SolutionDeployer:
                         f"a bundle may not reuse another owner's entity id"
                     )
 
+            mwf_model = ManifestWorkflow(**mwf)
             values = {
-                "name": mwf["name"],
-                "function_name": mwf["function_name"],
-                "path": mwf["path"],
-                "type": mwf.get("type", "workflow"),
-                "is_active": True,
-                # Full-replace deploy-owned metadata so a redeploy that changes
-                # (or clears) these is reflected, not left stale (criteria 10/14).
-                "description": mwf.get("description"),
-                "tool_description": mwf.get("tool_description"),
-                "endpoint_enabled": mwf.get("endpoint_enabled", False),
-                "public_endpoint": mwf.get("public_endpoint", False),
-                "timeout_seconds": mwf.get("timeout_seconds", 1800),
-                "category": mwf.get("category", "General"),
-                "tags": mwf.get("tags") or [],
+                **mwf_model.to_orm_values(Destination.INSTALL).direct,
                 # Scope is inherited from the install — no per-entity binding.
                 "organization_id": solution.organization_id,
                 "solution_id": sid,
             }
-            if mwf.get("access_level") is not None:
-                values["access_level"] = mwf["access_level"]
             # Safe now: the id is either absent or already this install's.
             await Upsert(
                 model=Workflow, id=wf_id, values=values, match_on="id"
@@ -826,6 +819,8 @@ class SolutionDeployer:
         (``solution_id == sid AND id NOT IN bundle_ids``) would delete the table
         it just re-adopted.
         """
+        from bifrost.manifest import ManifestTable
+        from bifrost.manifest_codec import Destination
         from shared.policies.probe import make_seed_admin_bypass
         from src.core.pubsub import publish_policy_changed
         from src.models.contracts.policies import TablePolicies
@@ -850,8 +845,10 @@ class SolutionDeployer:
             seen_names.add(nm)
 
         for mtbl in tables:
+            mtbl_model = ManifestTable(**mtbl)
+            src = mtbl_model.to_orm_values(Destination.INSTALL).direct
             tbl_id = UUID(mtbl["id"])
-            name = mtbl["name"]
+            name = src["name"]
 
             # Resolve + VALIDATE policies before persisting (mirrors REST/manifest
             # paths) so a malformed AST is rejected at deploy, not at read time.
@@ -920,8 +917,8 @@ class SolutionDeployer:
                         origin_solution_slug=None,
                         origin_solution_id=None,
                         name=name,
-                        description=mtbl.get("description"),
-                        schema=mtbl.get("schema"),
+                        description=src["description"],
+                        schema=src["schema"],
                         access=access,
                     )
                 )
@@ -953,9 +950,7 @@ class SolutionDeployer:
             # (solution-owned metadata), so removing them in the bundle clears
             # the DB value rather than leaving it stale.
             values: dict[str, Any] = {
-                "name": name,
-                "description": mtbl.get("description"),
-                "schema": mtbl.get("schema"),
+                **src,
                 "access": access,
                 "organization_id": solution.organization_id,
                 "solution_id": sid,
@@ -1025,6 +1020,9 @@ class SolutionDeployer:
         Ownership guard mirrors workflows/tables: a bundle UUID must not collide
         with a row owned by ``_repo/`` (NULL) or another install.
         """
+        from bifrost.manifest import ManifestApp
+        from bifrost.manifest_codec import Destination
+
         sid = solution.id
         builds: list[dict[str, Any]] = []
         for mapp in apps:
@@ -1106,20 +1104,22 @@ class SolutionDeployer:
                     f"inline_v1 apps are not supported in a Solution bundle."
                 )
             now = datetime.now(timezone.utc)
+            # Build model-field dict; transport extra "repo_path" maps to model field "path".
+            # _collect_apps (CLI zip path) emits neither "path" nor "repo_path" — fall
+            # back to f"apps/{slug}" so to_orm_values can derive repo_path from it.
+            mapp_fields = {k: v for k, v in mapp.items() if k in ManifestApp.model_fields}
+            if "path" not in mapp_fields:
+                mapp_fields["path"] = mapp.get("repo_path") or f"apps/{slug}"
+            mapp_model = ManifestApp(**mapp_fields)
+            _direct = mapp_model.to_orm_values(Destination.INSTALL).direct
             values: dict[str, Any] = {
-                "name": mapp.get("name") or slug,
-                "slug": slug,
-                "repo_path": mapp.get("repo_path") or f"apps/{slug}",
-                "description": mapp.get("description"),
-                "dependencies": mapp.get("dependencies") or None,
-                "app_model": app_model,
+                **_direct,
+                # deploy overrides: org/solution/publish metadata stamped at deploy time.
                 "organization_id": solution.organization_id,
                 "solution_id": sid,
                 "published_snapshot": {"deployed_by": "solution", "app_model": app_model},
                 "published_at": now,
             }
-            if mapp.get("access_level") is not None:
-                values["access_level"] = mapp["access_level"]
             # App LOGO declared in the manifest (`logo:` path), carried by the
             # collector as base64 (the only way a solution-managed app gets a
             # logo — the upload endpoint is blocked for it). Validate + sanitize
@@ -1349,9 +1349,16 @@ class SolutionDeployer:
             # writer — full-replace from the manifest so a redeploy reflects both
             # adds and removes. connection_ids reference env-scoped MCPConnection
             # rows (NOT solution entities), so they are NOT id-remapped.
-            await self._sync_agent_mcp_connections(
-                agent_id, self._parse_uuids(magent.get("mcp_connection_ids"))
-            )
+            # Guard on KEY PRESENCE, not truthiness: install bundles built by
+            # capture._agent_entries OMIT mcp_connection_ids entirely — an ABSENT
+            # key must NOT trigger a full-replace-to-[] that wipes existing grants
+            # (the redeploy bug). But a PRESENT key, even `[]`, is an explicit
+            # intent ("these grants, including none") and must full-replace so an
+            # author can remove all grants. (capture never emits [], so this only
+            # reaches hand-authored / git-sync bundles.)
+            if "mcp_connection_ids" in magent:
+                mcp_ids = self._parse_uuids(magent.get("mcp_connection_ids") or [])
+                await self._sync_agent_mcp_connections(agent_id, mcp_ids)
 
     async def _upsert_config_schemas(
         self, solution: Solution, config_schemas: list[dict[str, Any]]
@@ -1377,18 +1384,14 @@ class SolutionDeployer:
                 )
             seen.add(k)
 
+        from bifrost.manifest import ManifestSolutionConfigSchema
+        from bifrost.manifest_codec import Destination
+
         for entry in config_schemas:
             cid = UUID(entry["id"])
             await self._guard_owner(SolutionConfigSchema, cid, sid)
-            values: dict[str, Any] = {
-                "solution_id": sid,
-                "key": entry["key"],
-                "type": entry["type"],
-                "required": bool(entry.get("required", False)),
-                "description": entry.get("description"),
-                "default": entry.get("default"),
-                "position": int(entry.get("position", 0)),
-            }
+            direct = ManifestSolutionConfigSchema(**entry).to_orm_values(Destination.INSTALL).direct
+            values: dict[str, Any] = {"solution_id": sid, **direct}
             await Upsert(
                 model=SolutionConfigSchema, id=cid, values=values, match_on="id"
             ).execute(self.db)
@@ -1547,6 +1550,9 @@ class SolutionDeployer:
         """
         from src.models.enums import ScheduleOverlapPolicy
 
+        from bifrost.manifest import ManifestEventSource
+        from bifrost.manifest_codec import Destination
+
         sid = solution.id
         for mevent in events:
             source_id = UUID(str(mevent["id"]))
@@ -1569,11 +1575,10 @@ class SolutionDeployer:
                 )
             )
 
+            # Source parent field dict from the model; install stamps org/solution/created_by.
+            _direct = ManifestEventSource.model_validate(mevent).to_orm_values(Destination.INSTALL).direct
             source_values: dict[str, Any] = {
-                "name": mevent.get("name") or "",
-                "source_type": mevent["source_type"],
-                "event_type": mevent.get("event_type"),
-                "is_active": mevent.get("is_active", True),
+                **_direct,
                 "organization_id": solution.organization_id,
                 "solution_id": sid,
                 "created_by": "solution-deploy",

@@ -7967,12 +7967,26 @@ export interface paths {
         /**
          * Update Document
          * @description Update a document and re-embed. Optionally change scope.
+         *
+         *     Re-embedding goes through the same chunk → embed → store path as create
+         *     (``KnowledgeRepository.replace_chunked``): the document's rows are
+         *     replaced with freshly chunked-and-embedded rows — long content is
+         *     re-chunked into multiple rows, each with a flat per-chunk vector (the
+         *     previous code assigned the whole batch result to a single row's
+         *     ``embedding``, which crashed on ``float()`` and never chunked).
+         *
+         *     Identity is stable across edits: the document keeps its id and its
+         *     original ``created_at`` (so edits don't reorder created_at-sorted
+         *     listings). Scope changes are a true *move*: the old rows (in the source
+         *     org) are removed, not left behind as a copy, and a collision with a
+         *     document already holding the same identity in the target scope 409s
+         *     unless ``replace=true``.
          */
         put: operations["update_document_api_knowledge_sources__namespace__documents__doc_id__put"];
         post?: never;
         /**
          * Delete Document
-         * @description Delete a document.
+         * @description Delete a document — every chunk row of it, not just the addressed row.
          */
         delete: operations["delete_document_api_knowledge_sources__namespace__documents__doc_id__delete"];
         options?: never;

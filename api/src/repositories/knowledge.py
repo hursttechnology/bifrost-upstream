@@ -15,7 +15,7 @@ from sqlalchemy import delete, func, select
 from src.models.orm import KnowledgeStore
 from src.repositories.org_scoped import OrgScopedRepository
 from src.services.embeddings import BaseEmbeddingClient
-from src.services.knowledge.chunking import split_into_chunks
+from src.services.knowledge.chunking import reassemble_chunks, split_into_chunks
 
 
 @dataclass
@@ -59,6 +59,92 @@ class KnowledgeRepository(OrgScopedRepository[KnowledgeStore]):
     model = KnowledgeStore
     role_table = None  # No RBAC - SDK-only access
 
+    @staticmethod
+    def _identity_clauses(
+        namespace: str,
+        key: str | None,
+        organization_id: UUID | None,
+    ) -> list:
+        """WHERE clauses selecting every chunk row of one logical document.
+
+        NULL-aware on both key and org: under the NULLS NOT DISTINCT unique
+        constraint a NULL key (keyless doc) and NULL org (global scope) are
+        real identities, not wildcards — a namespace/org pair holds at most
+        one keyless document.
+        """
+        return [
+            KnowledgeStore.namespace == namespace,
+            KnowledgeStore.key == key
+            if key is not None
+            else KnowledgeStore.key.is_(None),
+            KnowledgeStore.organization_id == organization_id
+            if organization_id is not None
+            else KnowledgeStore.organization_id.is_(None),
+        ]
+
+    @staticmethod
+    def _as_document(rows: list[KnowledgeStore]) -> KnowledgeDocument:
+        """Collapse one document's chunk rows (in chunk_index order) into a
+        KnowledgeDocument carrying the reassembled original content. The
+        first chunk row provides the document's public id and audit fields.
+        """
+        first = rows[0]
+        content = (
+            first.content
+            if len(rows) == 1
+            else reassemble_chunks([row.content for row in rows])
+        )
+        return KnowledgeDocument(
+            id=str(first.id),
+            namespace=first.namespace,
+            content=content,
+            metadata=first.doc_metadata,
+            organization_id=str(first.organization_id)
+            if first.organization_id
+            else None,
+            key=first.key,
+            created_at=first.created_at,
+        )
+
+    async def _embed_chunks(
+        self, content: str, embedder: BaseEmbeddingClient
+    ) -> tuple[list[str], list[list[float]]]:
+        """Split content and embed every chunk, validating batch shape."""
+        chunks = split_into_chunks(content)
+        embeddings = await embedder.embed(chunks)
+        if len(embeddings) != len(chunks):
+            raise ValueError(
+                f"Embedder returned {len(embeddings)} embeddings for {len(chunks)} chunks"
+            )
+        return chunks, embeddings
+
+    def _build_chunk_rows(
+        self,
+        chunks: list[str],
+        embeddings: list[list[float]],
+        *,
+        namespace: str,
+        key: str | None,
+        metadata: dict[str, Any] | None,
+        organization_id: UUID | None,
+        created_by: UUID | None,
+    ) -> list[KnowledgeStore]:
+        chunk_count = len(chunks)
+        return [
+            KnowledgeStore(
+                namespace=namespace,
+                organization_id=organization_id,
+                key=key,
+                content=chunk,
+                doc_metadata=metadata or {},
+                embedding=embedding,
+                created_by=created_by,
+                chunk_index=index,
+                chunk_count=chunk_count,
+            )
+            for index, (chunk, embedding) in enumerate(zip(chunks, embeddings))
+        ]
+
     async def store_chunked(
         self,
         content: str,
@@ -91,43 +177,118 @@ class KnowledgeRepository(OrgScopedRepository[KnowledgeStore]):
             raise ValueError("store_chunked requires an embedder")
 
         target_org_id = organization_id if organization_id is not None else self.org_id
-        chunks = split_into_chunks(content)
-        embeddings = await embedder.embed(chunks)
-
-        if len(embeddings) != len(chunks):
-            raise ValueError(
-                f"Embedder returned {len(embeddings)} embeddings for {len(chunks)} chunks"
-            )
+        chunks, embeddings = await self._embed_chunks(content, embedder)
 
         if key is not None:
-            stmt = delete(KnowledgeStore).where(
-                KnowledgeStore.key == key,
-                KnowledgeStore.namespace == namespace,
+            await self.session.execute(
+                delete(KnowledgeStore).where(
+                    *self._identity_clauses(namespace, key, target_org_id)
+                )
             )
-            if target_org_id is not None:
-                stmt = stmt.where(KnowledgeStore.organization_id == target_org_id)
-            else:
-                stmt = stmt.where(KnowledgeStore.organization_id.is_(None))
-            await self.session.execute(stmt)
 
-        chunk_count = len(chunks)
-        rows = [
-            KnowledgeStore(
-                namespace=namespace,
-                organization_id=target_org_id,
-                key=key,
-                content=chunk,
-                doc_metadata=metadata or {},
-                embedding=embedding,
-                created_by=created_by,
-                chunk_index=index,
-                chunk_count=chunk_count,
-            )
-            for index, (chunk, embedding) in enumerate(zip(chunks, embeddings))
-        ]
+        rows = self._build_chunk_rows(
+            chunks,
+            embeddings,
+            namespace=namespace,
+            key=key,
+            metadata=metadata,
+            organization_id=target_org_id,
+            created_by=created_by,
+        )
         self.session.add_all(rows)
         await self.session.flush()
         return [str(row.id) for row in rows]
+
+    async def replace_chunked(
+        self,
+        doc_id: UUID,
+        content: str,
+        namespace: str,
+        key: str | None,
+        current_organization_id: UUID | None,
+        organization_id: UUID | None,
+        metadata: dict[str, Any] | None,
+        created_by: UUID | None,
+        created_at: datetime,
+        embedder: BaseEmbeddingClient,
+    ) -> list[str]:
+        """
+        Replace one logical document with freshly chunked-and-embedded rows,
+        keeping its public identity: the first new row reuses ``doc_id`` (so
+        stored references survive edits) and every new row carries the
+        original ``created_at`` (so edits don't reorder created_at-sorted
+        listings). ``updated_at`` resets to now on the new rows.
+
+        Old rows are deleted by document identity in the *current* scope and
+        new rows are written to ``organization_id`` — when the two differ a
+        scope change is a move, not a copy. Everything is flushed, never
+        committed; the caller's transaction boundary decides. The embed runs
+        before the delete, so an embedding failure leaves the document
+        completely untouched.
+
+        Returns:
+            Inserted row IDs (UUID strings) in chunk_index order;
+            the first is always ``str(doc_id)``.
+        """
+        chunks, embeddings = await self._embed_chunks(content, embedder)
+
+        await self.session.execute(
+            delete(KnowledgeStore).where(
+                *self._identity_clauses(namespace, key, current_organization_id)
+            )
+        )
+        await self.session.flush()
+
+        rows = self._build_chunk_rows(
+            chunks,
+            embeddings,
+            namespace=namespace,
+            key=key,
+            metadata=metadata,
+            organization_id=organization_id,
+            created_by=created_by,
+        )
+        rows[0].id = doc_id
+        for row in rows:
+            row.created_at = created_at
+        self.session.add_all(rows)
+        await self.session.flush()
+        return [str(row.id) for row in rows]
+
+    async def find_document_id(
+        self,
+        namespace: str,
+        key: str | None,
+        organization_id: UUID | None,
+    ) -> UUID | None:
+        """
+        Id of the first-chunk row of the document with this exact identity,
+        or None. ``chunk_index == 0`` makes this at-most-one row under the
+        unique constraint — including keyless documents, whose NULL keys
+        collide with each other under NULLS NOT DISTINCT.
+        """
+        result = await self.session.execute(
+            select(KnowledgeStore.id).where(
+                *self._identity_clauses(namespace, key, organization_id),
+                KnowledgeStore.chunk_index == 0,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def delete_document(
+        self,
+        namespace: str,
+        key: str | None,
+        organization_id: UUID | None,
+    ) -> None:
+        """Delete every chunk row of the document with this exact identity
+        (NULL-aware on key and org — no defaulting to ``self.org_id``)."""
+        await self.session.execute(
+            delete(KnowledgeStore).where(
+                *self._identity_clauses(namespace, key, organization_id)
+            )
+        )
+        await self.session.flush()
 
     async def search(
         self,
@@ -382,9 +543,13 @@ class KnowledgeRepository(OrgScopedRepository[KnowledgeStore]):
         """
         # Use self.org_id as default if not explicitly provided
         target_org_id = organization_id if organization_id is not None else self.org_id
-        stmt = select(KnowledgeStore).where(
-            KnowledgeStore.key == key,
-            KnowledgeStore.namespace == namespace,
+        stmt = (
+            select(KnowledgeStore)
+            .where(
+                KnowledgeStore.key == key,
+                KnowledgeStore.namespace == namespace,
+            )
+            .order_by(KnowledgeStore.chunk_index)
         )
 
         if target_org_id:
@@ -393,20 +558,14 @@ class KnowledgeRepository(OrgScopedRepository[KnowledgeStore]):
             stmt = stmt.where(KnowledgeStore.organization_id.is_(None))
 
         result = await self.session.execute(stmt)
-        doc = result.scalar_one_or_none()
+        rows = list(result.scalars().all())
 
-        if not doc:
+        if not rows:
             return None
 
-        return KnowledgeDocument(
-            id=str(doc.id),
-            namespace=doc.namespace,
-            content=doc.content,
-            metadata=doc.doc_metadata,
-            organization_id=str(doc.organization_id) if doc.organization_id else None,
-            key=doc.key,
-            created_at=doc.created_at,
-        )
+        # A keyed doc may span multiple chunk rows — reassemble the full
+        # content (the old single-row read raised MultipleResultsFound here).
+        return self._as_document(rows)
 
     async def get_all_by_namespace(
         self,
@@ -458,7 +617,12 @@ class KnowledgeRepository(OrgScopedRepository[KnowledgeStore]):
         self,
         doc_id: UUID,
     ) -> KnowledgeDocument | None:
-        """Get a document by its UUID."""
+        """Get a full logical document by any of its chunk-row UUIDs.
+
+        Multi-chunk documents are reassembled into their original content;
+        the returned id/created_at are the first chunk row's (the document's
+        stable public identity).
+        """
         stmt = select(KnowledgeStore).where(KnowledgeStore.id == doc_id)
         result = await self.session.execute(stmt)
         doc = result.scalar_one_or_none()
@@ -466,15 +630,24 @@ class KnowledgeRepository(OrgScopedRepository[KnowledgeStore]):
         if not doc:
             return None
 
-        return KnowledgeDocument(
-            id=str(doc.id),
-            namespace=doc.namespace,
-            content=doc.content,
-            metadata=doc.doc_metadata,
-            organization_id=str(doc.organization_id) if doc.organization_id else None,
-            key=doc.key,
-            created_at=doc.created_at,
-        )
+        rows = [doc]
+        if doc.chunk_count > 1:
+            rows = list(
+                (
+                    await self.session.execute(
+                        select(KnowledgeStore)
+                        .where(
+                            *self._identity_clauses(
+                                doc.namespace, doc.key, doc.organization_id
+                            )
+                        )
+                        .order_by(KnowledgeStore.chunk_index)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return self._as_document(rows)
 
     async def list_documents_by_namespace(
         self,

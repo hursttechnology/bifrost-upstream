@@ -215,3 +215,6 @@ system//home/
 client/preview/
 .desloppify/
 scorecard.png
+
+graphify-out
+api/graphify-out

@@ -1,0 +1,71 @@
+# Hurst Technology hotfix image build.
+#
+# Builds the API and client production images from an hts-v* tag and pushes
+# them to this fork's GHCR namespace. Uses an hts- prefix so upstream's v*
+# release pipeline in ci.yml (which pushes to ghcr.io/gobifrost) never fires.
+#
+#   git tag hts-v1.4.1.post1 && git push origin hts-v1.4.1.post1
+#   -> ghcr.io/hursttechnology/bifrost-api:1.4.1.post1
+#   -> ghcr.io/hursttechnology/bifrost-client:1.4.1.post1
+
+name: HTS Hotfix Images
+
+on:
+  push:
+    tags: ["hts-v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - image: api
+            context: .
+            file: ./api/Dockerfile
+            target: ""
+            version_arg: BIFROST_VERSION
+          - image: client
+            context: ./client
+            file: ./client/Dockerfile
+            target: production
+            version_arg: VITE_BIFROST_VERSION
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Compute version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/hts-v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/hursttechnology/bifrost-${{ matrix.image }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/hursttechnology/bifrost-${{ matrix.image }}:sha-${{ github.sha }}
+          build-args: ${{ matrix.version_arg }}=${{ steps.version.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}

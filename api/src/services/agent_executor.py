@@ -651,7 +651,7 @@ class AgentExecutor:
                 # history already contains its original system part.
                 instructions=system_prompt,
                 toolsets=[toolset] if tool_definitions else [],
-                capabilities=build_runtime_capabilities(budget),
+                capabilities=build_runtime_capabilities(budget, context_window=None),
                 model_settings=agent_model_settings(
                     llm_client.config,
                     max_tokens=max_tokens_override,

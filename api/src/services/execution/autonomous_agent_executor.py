@@ -387,7 +387,7 @@ class AutonomousAgentExecutor:
                 execution_context={"mode": "autonomous"},
             ),
             toolsets=[toolset] if tool_definitions else [],
-            capabilities=build_runtime_capabilities(budget),
+            capabilities=build_runtime_capabilities(budget, context_window=None),
             model_settings=agent_model_settings(
                 llm_config,
                 max_tokens=agent.llm_max_tokens,

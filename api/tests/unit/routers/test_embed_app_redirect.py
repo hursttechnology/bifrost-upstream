@@ -245,3 +245,17 @@ class TestRedirectHeadersForOrdinaryApps:
         assert response.status_code == 302
         assert response.headers["content-security-policy"] == "frame-ancestors *"
         assert response.headers["x-frame-options"] == "ALLOWALL"
+
+    @pytest.mark.parametrize("policy", [
+        "https://support.hurst.technology", "'self' https://other.example:8443",
+    ])
+    def test_configured_app_uses_exact_policy(self, monkeypatch, policy):
+        monkeypatch.setattr(embed, "get_settings", lambda: SimpleNamespace(
+            embed_app_frame_ancestors={"heimdall": policy}
+        ), raising=False)
+        client = _client(monkeypatch, _app_row("heimdall"))
+        response = _launch(client, slug="heimdall")
+
+        assert response.status_code == 302
+        assert response.headers["content-security-policy"] == f"frame-ancestors {policy}"
+        assert "x-frame-options" not in response.headers

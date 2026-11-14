@@ -185,6 +185,10 @@ async def _verified_app_embed_capability(
 
     if request.code is not None or request.run_as is not None:
         raise SdkWorkflowExecutionError(403, "App embeds may only execute workflows")
+    # A delayed run would later execute without the embed marker, so any
+    # schedule (including zero or past values) is refused before insertion.
+    if request.scheduled_at is not None or request.delay_seconds is not None:
+        raise SdkWorkflowExecutionError(422, "App embeds cannot schedule workflow runs")
 
     # A signed app capability is its sole parent attestation.  A body or
     # transport parent can only repeat the signed app's own identity; it can

@@ -252,7 +252,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
 			// Check if token is expired
 			if (isTokenExpired(token)) {
 				if (isEmbedSession()) {
-					clearEmbedToken();
+					clearAuthTokens();
 					setUser(null);
 					setIsLoading(false);
 					return;
@@ -421,7 +421,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
 	// Logout
 	const logout = useCallback(() => {
 		if (isEmbedSession()) {
-			clearEmbedToken();
+			// Keeps a failed embed launch closed; only an explicit login ends it.
+			clearAuthTokens();
 			setUser(null);
 			navigate("/login");
 			return;

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { apiClient, authFetch, setRefusedChangeListener } from "./api-client";
 import {
 	ACCESS_TOKEN_KEY,
+	EMBED_LAUNCH_FAILED_KEY,
 	setImpersonationToken,
 } from "./auth-token";
 
@@ -70,6 +71,22 @@ describe("V2 app platform auth bridge", () => {
 		]);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(bridge!.getAccessToken()).toBe(refreshedToken);
+	});
+
+	it("never refreshes into the user's session after a failed embed launch", async () => {
+		const fetchMock = vi.fn(async () =>
+			mockJsonResponse(200, { access_token: buildFakeToken() }),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		localStorage.setItem(ACCESS_TOKEN_KEY, "user-token");
+		sessionStorage.setItem(EMBED_LAUNCH_FAILED_KEY, "1");
+		const bridge = (globalThis as TestPlatformAuthGlobal)
+			.__BIFROST_PLATFORM_AUTH_V1__;
+
+		expect(bridge!.canRefreshAccessToken()).toBe(false);
+		await expect(bridge!.refreshAccessToken()).resolves.toBe(false);
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(bridge!.getAccessToken()).toBeNull();
 	});
 });
 

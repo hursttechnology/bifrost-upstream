@@ -5,7 +5,9 @@ import { AuthProvider, useAuth } from "./AuthContext";
 import { authFetch } from "@/lib/api-client";
 import {
 	ACCESS_TOKEN_KEY,
+	EMBED_LAUNCH_FAILED_KEY,
 	IMPERSONATION_TOKEN_KEY,
+	getActiveToken,
 	setImpersonationToken,
 } from "@/lib/auth-token";
 
@@ -217,6 +219,34 @@ it("signs an embed out without clearing shared cookies or browser credentials", 
 	expect(localStorage.getItem(ACCESS_TOKEN_KEY)).toBe("operator-token");
 	expect(localStorage.getItem(IMPERSONATION_TOKEN_KEY)).toBe("impersonated-token");
 	expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/api/auth/logout"))).toBe(false);
+});
+
+it("keeps a failed embed launch signed out without refreshing the user's session", async () => {
+	const userToken = `header.${btoa(JSON.stringify({ sub: "account", email: "account@example.test", exp: Math.floor(Date.now() / 1000) + 3600 }))}.signature`;
+	localStorage.setItem(ACCESS_TOKEN_KEY, userToken);
+	sessionStorage.setItem(EMBED_LAUNCH_FAILED_KEY, "1");
+	const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+		const url = String(input);
+		if (url.endsWith("/api/auth/refresh")) return Response.json({ access_token: userToken });
+		return Response.json({ needs_setup: false });
+	});
+	vi.stubGlobal("fetch", fetchMock);
+	let auth: ReturnType<typeof useAuth> | undefined;
+	function Probe() {
+		auth = useAuth();
+		return null;
+	}
+	render(<MemoryRouter><AuthProvider><Probe /></AuthProvider></MemoryRouter>);
+	await vi.waitFor(() => expect(auth?.isLoading).toBe(false));
+
+	expect(auth!.user).toBeNull();
+	expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/api/auth/refresh"))).toBe(false);
+
+	act(() => auth!.logout());
+
+	expect(sessionStorage.getItem(EMBED_LAUNCH_FAILED_KEY)).not.toBeNull();
+	expect(getActiveToken()).toBeNull();
+	expect(localStorage.getItem(ACCESS_TOKEN_KEY)).toBe(userToken);
 });
 
 it("restores the operator token before releasing the override to other tabs", async () => {

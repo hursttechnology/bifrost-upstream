@@ -112,6 +112,7 @@ export { useParams } from "./app-code-platform/useParams";
 export { useSearchParams } from "./app-code-platform/useSearchParams";
 export { navigate, useNavigate } from "./app-code-platform/navigate";
 export { useUser } from "./app-code-platform/useUser";
+export { useEmbedLaunch } from "./app-code-platform/useEmbedLaunch";
 export { RequireRole } from "./app-code-platform/RequireRole";
 export { useAppState } from "./app-code-platform/useAppState";
 export { Link, NavLink, Navigate } from "./app-code-platform/navigation";

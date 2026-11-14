@@ -1,6 +1,7 @@
 """Public embed entry point — HMAC-verified iframe loading."""
 
 import logging
+import re
 from datetime import timedelta
 from urllib.parse import urlencode
 
@@ -33,6 +34,27 @@ _FORM_PRESENTATION_VALUES = {
     "header": {"true", "false"},
     "background": {"solid", "transparent"},
 }
+
+
+# Unsigned launch hints an app embed passes to its page, in fragment order.
+# They are not covered by the signature, so they never enter the token.
+_APP_UNSIGNED_HINT_KEYS = ("ticket_id", "client_id")
+_APP_UNSIGNED_HINT_VALUE = re.compile(r"[0-9]{1,12}")
+
+
+def _app_unsigned_hint_fragment(request: Request) -> str:
+    """Return the ``&unsigned.<key>=<digits>`` fragment suffix for an app embed.
+
+    A hint passes only when it appears exactly once and is 1 to 12 ASCII
+    digits; anything else is silently dropped.
+    """
+
+    suffix = ""
+    for key in _APP_UNSIGNED_HINT_KEYS:
+        values = request.query_params.getlist(key)
+        if len(values) == 1 and _APP_UNSIGNED_HINT_VALUE.fullmatch(values[0]):
+            suffix += f"&unsigned.{key}={values[0]}"
+    return suffix
 
 
 def _form_presentation_query(query_params: dict[str, str]) -> str:
@@ -171,7 +193,10 @@ async def embed_app(
     # keeping the token client-side only. This avoids cross-origin cookie
     # issues when third-party sites embed Bifrost apps in iframes.
     redirect = RedirectResponse(
-        url=f"/apps/{app.slug}#embed_token={access_token}",
+        url=(
+            f"/apps/{app.slug}#embed_token={access_token}"
+            f"{_app_unsigned_hint_fragment(request)}"
+        ),
         status_code=302,
     )
 

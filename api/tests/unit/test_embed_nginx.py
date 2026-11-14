@@ -59,7 +59,8 @@ def test_access_log_uses_redacted_request_and_referer():
     log_format = CONF.split("log_format embed_redacted ", 1)[1].split(";", 1)[0]
     assert " ".join(log_format.split()) == (
         "'$remote_addr - $remote_user [$time_local] \"$embed_log_request\" ' "
-        "'$status $body_bytes_sent \"$embed_log_referer\" \"$http_user_agent\"'"
+        "'$status $body_bytes_sent \"$embed_log_referer\" ' "
+        "'\"$http_user_agent\" \"$http_x_forwarded_for\"'"
     )
     assert CONF.index("log_format embed_redacted") < CONF.index("server {")
     assert "access_log /var/log/nginx/access.log embed_redacted;" in block("server {")

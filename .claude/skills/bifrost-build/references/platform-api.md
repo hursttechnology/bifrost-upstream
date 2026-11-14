@@ -509,6 +509,22 @@ export default function AdminPage() {
 }
 ```
 
+### useEmbedLaunch
+
+Signature: `useEmbedLaunch(): { isEmbed: boolean; unsigned: { ticket_id?: string; client_id?: string } }`.
+
+`isEmbed` is true only when the page was opened through a signed app embed link (not a form embed, not a failed embed launch). `unsigned` holds the `ticket_id` and `client_id` values from that link (1 to 12 digits each) and is empty unless `isEmbed`. They are UNSIGNED hints the person in the frame can change: never use them for authorisation, and have the workflow re-check anything it acts on. The returned object is stable for the life of the page. On an older platform without this hook, treat a missing export as `{ isEmbed: false, unsigned: {} }`.
+
+```tsx
+import { useEmbedLaunch } from "bifrost";
+
+export default function TicketTab() {
+  const { isEmbed, unsigned } = useEmbedLaunch();
+  const ticketHint = isEmbed ? unsigned.ticket_id : undefined;
+  return <div>{ticketHint ? `Ticket ${ticketHint}` : "Open from a ticket"}</div>;
+}
+```
+
 ### useWorkflowMutation
 
 Signature:

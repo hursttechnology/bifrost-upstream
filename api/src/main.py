@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from src.config import get_settings
 from src.core.csrf import CSRFMiddleware
 from src.core.embed_middleware import EmbedScopeMiddleware
+from src.core.log_redaction import install_embed_log_redaction
 from src.core.request_body_limit import RouteBodyLimitMiddleware
 from src.core.database import close_db, get_session_factory, init_db
 from src.core.pubsub import manager as pubsub_manager
@@ -109,6 +110,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
+install_embed_log_redaction()
 
 # Suppress noisy third-party loggers
 logging.getLogger("aiormq").setLevel(logging.WARNING)
@@ -133,6 +135,7 @@ async def app_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Handles startup and shutdown events for the main application.
     """
     # Startup
+    install_embed_log_redaction()
     logger.info("Starting Bifrost API...")
     settings = get_settings()
 

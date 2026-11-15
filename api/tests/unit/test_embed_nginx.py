@@ -13,16 +13,20 @@ def block(marker):
     return CONF.split(marker, 1)[1].split("}", 1)[0]
 
 
+APP_MARKER = "location ~ ^/apps/(?<app_frame_slug>[a-z][a-z0-9-]*)(?:/.*)?$ {"
+STATIC_MARKER = "location ~* \\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {"
+
+
 def test_app_document_policy_wiring():
-    marker = "location ~ ^/apps/(?<app_frame_slug>[a-z][a-z0-9-]*)(/[^.]*)?$ {"
-    document = block(marker)
+    document = block(APP_MARKER)
     assert "auth_request /_app_frame_policy;" in document
     assert "auth_request_set $app_frame_ancestors $upstream_http_x_bifrost_frame_ancestors;" in document
     assert 'add_header Content-Security-Policy $app_frame_csp always;' in document
     assert 'add_header Cache-Control "no-store, must-revalidate" always;' in document
     assert "etag off;" in document
     assert "try_files /index.html =404;" in document
-    assert CONF.index(marker) < CONF.index("location ~* \\.")
+    # Regex locations match in order: real assets must reach the static handler first.
+    assert CONF.index(STATIC_MARKER) < CONF.index(APP_MARKER)
     internal = block("location = /_app_frame_policy {")
     assert "internal;" in internal
     assert "rewrite ^ /embed/apps/$app_frame_slug/frame-policy break;" in internal
@@ -35,18 +39,23 @@ def test_app_document_policy_wiring():
     assert CONF.index("map $app_frame_ancestors") < CONF.index("server {")
 
 
-@pytest.mark.parametrize("path, matches", [
-    ("/apps/heimdall", True), ("/apps/heimdall/", True),
-    ("/apps/heimdall/tab/ticket", True), ("/apps/ordinary/preview", True),
-    ("/apps/heimdall/main.js", False), ("/apps/heimdall/a.b/page", False),
-    ("/apps/heimdall.css", False), ("/apps/heimdall/a.json", False),
-    ("/other/heimdall", False),
+@pytest.mark.parametrize("path, handler", [
+    ("/apps/heimdall", "app"), ("/apps/heimdall/", "app"),
+    ("/apps/heimdall/tab/ticket", "app"), ("/apps/ordinary/preview", "app"),
+    ("/apps/heimdall/a.b", "app"), ("/apps/heimdall/a.b/page", "app"),
+    ("/apps/heimdall/a.json", "app"), ("/apps/heimdall/x.js/", "app"),
+    ("/apps/heimdall/main.js", "static"), ("/apps/heimdall/logo.SVG", "static"),
+    ("/apps/heimdall.css", "static"), ("/apps/heimdall.x", None), ("/other/heimdall", None),
 ])
-def test_app_document_location_excludes_assets(path, matches):
-    pattern = re.search(r"location ~ (\^/apps/\S+) \{", CONF)
-    assert pattern is not None
-    python_pattern = pattern[1].replace("(?<app_frame_slug>", "(?P<app_frame_slug>")
-    assert bool(re.fullmatch(python_pattern, path)) is matches
+def test_app_document_location_leaves_real_assets_to_the_static_handler(path, handler):
+    def regex(marker, flags=0):
+        pattern = marker.split(" ")[2]
+        return re.compile(re.sub(r"\(\?<([a-z_]+)>", r"(?P<\1>", pattern), flags)
+
+    # The static location comes first (pinned above) and is case-insensitive.
+    static, app = regex(STATIC_MARKER, re.IGNORECASE), regex(APP_MARKER)
+    winner = "static" if static.search(path) else "app" if app.search(path) else None
+    assert winner == handler
 
 
 def test_access_log_uses_redacted_request_and_referer():

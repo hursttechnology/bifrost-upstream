@@ -1,9 +1,10 @@
 """Serve the real client/nginx.conf with a real nginx binary.
 
 Only environment details are substituted: a loopback listen port, a temporary
-document root and log, a loopback upstream that answers through the real embed
-router (with the synthetic fixtures of test_embed_app_redirect), and no gzip
-(the test binary is built without it). Set BIFROST_TEST_NGINX to the binary.
+document root and logs, a loopback upstream that answers through the real embed
+router (with the synthetic fixtures of test_embed_app_redirect) or, for the
+upstream-failure cases, a closed loopback port, and no gzip (the test binary
+is built without it). Set BIFROST_TEST_NGINX to the binary.
 
 Log lines and the signed fixture are never printed: every log assertion is
 reduced to a boolean or a count before it is asserted.
@@ -11,6 +12,7 @@ reduced to a boolean or a count before it is asserted.
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import os
 import socket
@@ -45,9 +47,10 @@ def _free_port() -> int:
 
 
 class _Proxy:
-    def __init__(self, port: int, access_log: Path):
+    def __init__(self, port: int, access_log: Path, error_log: Path):
         self.port = port
         self.access_log = access_log
+        self.error_log = error_log
 
     def get(self, target: str, headers: dict[str, str] | None = None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -71,13 +74,59 @@ class _Proxy:
         raise AssertionError(f"no access-log line for {agent}")
 
 
+@contextlib.contextmanager
+def _serve_nginx(base: Path, upstream_port: int):
+    """Run the real config against a loopback upstream, logging under base.
+
+    The main error log runs at info, so a request message that escaped the
+    server's own error_log level would still land in error.log.
+    """
+    port = _free_port()
+    access_log, error_log = base / "access.log", base / "error.log"
+    conf = CONF.read_text()
+    for old, new in (
+        ("listen 80;", f"listen 127.0.0.1:{port};"),
+        ("root /usr/share/nginx/html;", f"root {base / 'html'};"),
+        ("http://api:8000", f"http://127.0.0.1:{upstream_port}"),
+        ("/var/log/nginx/access.log", str(access_log)),
+        ("/var/log/nginx/error.log", str(error_log)),
+    ):
+        assert old in conf, old
+        conf = conf.replace(old, new)
+    conf = "\n".join(
+        line for line in conf.splitlines() if not line.strip().startswith(("gzip ", "gzip_"))
+    )
+    config = base / "nginx.conf"
+    config.write_text(
+        f"daemon off;\npid {base / 'nginx.pid'};\nerror_log {error_log} info;\n"
+        f"events {{}}\nhttp {{\n{conf}\n}}\n"
+    )
+    command = [NGINX, "-p", f"{base}/", "-c", str(config)]
+    syntax = subprocess.run([*command, "-t"], capture_output=True, text=True)
+    assert syntax.returncode == 0, syntax.stderr
+
+    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(250):
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    break
+            except OSError:
+                time.sleep(0.02)
+        else:
+            raise AssertionError("nginx did not start listening")
+        yield _Proxy(port, access_log, error_log)
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+
 @pytest.fixture(scope="module")
 def proxy(tmp_path_factory):
     base = tmp_path_factory.mktemp("nginx")
     (base / "html/assets").mkdir(parents=True)
     (base / "html/index.html").write_bytes(DOCUMENT)
     (base / "html/assets/app.js").write_bytes(ASSET)
-    access_log = base / "access.log"
 
     patch = pytest.MonkeyPatch()
     client = _client(patch, _app_row("heimdall"))
@@ -102,42 +151,10 @@ def proxy(tmp_path_factory):
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
     threading.Thread(target=upstream.serve_forever, daemon=True).start()
 
-    port = _free_port()
-    conf = CONF.read_text()
-    for old, new in (
-        ("listen 80;", f"listen 127.0.0.1:{port};"),
-        ("root /usr/share/nginx/html;", f"root {base / 'html'};"),
-        ("http://api:8000", f"http://127.0.0.1:{upstream.server_port}"),
-        ("/var/log/nginx/access.log", str(access_log)),
-    ):
-        assert old in conf, old
-        conf = conf.replace(old, new)
-    conf = "\n".join(
-        line for line in conf.splitlines() if not line.strip().startswith(("gzip ", "gzip_"))
-    )
-    config = base / "nginx.conf"
-    config.write_text(
-        f"daemon off;\npid {base / 'nginx.pid'};\nerror_log {base / 'error.log'};\n"
-        f"events {{}}\nhttp {{\n{conf}\n}}\n"
-    )
-    command = [NGINX, "-p", f"{base}/", "-c", str(config)]
-    syntax = subprocess.run([*command, "-t"], capture_output=True, text=True)
-    assert syntax.returncode == 0, syntax.stderr
-
-    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        for _ in range(250):
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                    break
-            except OSError:
-                time.sleep(0.02)
-        else:
-            raise AssertionError("nginx did not start listening")
-        yield _Proxy(port, access_log)
+        with _serve_nginx(base, upstream.server_port) as running:
+            yield running
     finally:
-        process.terminate()
-        process.wait(timeout=10)
         upstream.shutdown()
         upstream.server_close()
         patch.undo()
@@ -242,3 +259,59 @@ def test_ordinary_requests_keep_their_query(proxy):
     agent = "request-ordinary"
     proxy.get("/apps/ordinary?view=list&page=2", {"User-Agent": agent})
     assert '"GET /apps/ordinary?view=list&page=2 HTTP/1.1"' in proxy.log_line(agent)
+
+
+@pytest.fixture(scope="module")
+def failing_proxy(tmp_path_factory):
+    """The real config with its API upstream down (a closed loopback port)."""
+    base = tmp_path_factory.mktemp("nginx-down")
+    (base / "html").mkdir()
+    (base / "html/index.html").write_bytes(DOCUMENT)
+    with _serve_nginx(base, _free_port()) as running:
+        yield running
+
+
+SIGNED_REFERER = f"https://bifrost.example/embed/apps/heimdall?{SIGNED_QUERY}"
+
+UPSTREAM_FAILURE_CASES = [
+    ("canonical-embed", f"/embed/apps/heimdall?{SIGNED_QUERY}", {},
+     "GET /embed/apps/heimdall?[redacted] HTTP/1.1"),
+    ("encoded-embed", f"/%65mbed/apps/heimdall?{SIGNED_QUERY}", {},
+     "GET /%65mbed/apps/heimdall?[redacted] HTTP/1.1"),
+    ("signed-referer-on-api", "/api/offline-control", {"Referer": SIGNED_REFERER},
+     "GET /api/offline-control HTTP/1.1"),
+]
+
+
+@pytest.mark.parametrize(
+    "label, target, headers, logged", UPSTREAM_FAILURE_CASES, ids=_ids(UPSTREAM_FAILURE_CASES)
+)
+def test_upstream_failures_keep_signed_queries_out_of_every_log(
+    failing_proxy, label, target, headers, logged
+):
+    agent = f"down-{label}"
+    status, _headers, _body = failing_proxy.get(target, {"User-Agent": agent, **headers})
+    assert status == 502
+    line = failing_proxy.log_line(agent)
+    recorded = f'"{logged}" 502 ' in line
+    assert recorded, f"{label}: access log lacks the redacted 502 record"
+    # nginx writes the error line before the response, so it exists by now.
+    error_text = failing_proxy.error_log.read_text()
+    leaked = SIGNED_HMAC in error_text or "agent_id=" in error_text
+    assert not leaked, f"{label}: signed query in the nginx error log"
+
+
+def test_upstream_failure_control_keeps_status_but_no_request_detail(failing_proxy):
+    # The documented trade-off: an ordinary upstream failure is still a 502
+    # in the access log, but nginx writes no request-bound error line for it.
+    agent = "down-ordinary"
+    target = "/api/ordinary-control?view=1"
+    status, _headers, _body = failing_proxy.get(target, {"User-Agent": agent})
+    assert status == 502
+    assert '"GET /api/ordinary-control?view=1 HTTP/1.1" 502 ' in failing_proxy.log_line(agent)
+    error_text = failing_proxy.error_log.read_text()
+    # The file is the live error sink (start-up notices reach it at info) ...
+    assert "start worker process" in error_text
+    # ... and no request detail reached it.
+    assert "ordinary-control" not in error_text
+    assert "while connecting to upstream" not in error_text

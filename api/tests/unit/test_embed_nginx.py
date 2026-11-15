@@ -85,6 +85,13 @@ def test_access_log_uses_redacted_request_and_referer():
     assert CONF.count("access_log ") == 1
 
 
+def test_error_log_carries_no_request_messages():
+    # nginx appends the raw request line and Referer to every request-bound
+    # error message, so the server logs only emerg (start-up and config).
+    assert "error_log /var/log/nginx/error.log emerg;" in block("server {")
+    assert CONF.count("error_log ") == 1
+
+
 def _apply_map_rule(marker, value):
     """Apply a map's single regex rule; None means the map's default applies."""
     rule = re.search(r'~(\S+)\s+"([^"]+)";', block(marker))

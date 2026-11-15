@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
 	ACCESS_TOKEN_KEY,
-	EMBED_LAUNCH_FAILED_KEY,
+	EMBED_ISOLATED_KEY,
 	EMBED_LAUNCH_HINTS_KEY,
 	EMBED_TOKEN_KEY,
 	IMPERSONATION_TOKEN_KEY,
@@ -148,6 +148,7 @@ describe("impersonation token storage", () => {
 		clearAuthTokens();
 
 		expect(sessionStorage.getItem(EMBED_TOKEN_KEY)).toBeNull();
+		expect(getActiveToken()).toBeNull();
 		expect(localStorage.getItem(ACCESS_TOKEN_KEY)).toBe("operator-token");
 		expect(localStorage.getItem(IMPERSONATION_TOKEN_KEY)).toBe(
 			"impersonated-token",
@@ -227,7 +228,7 @@ describe("consumeEmbedTokenFromHash in an iframe", () => {
 			isEmbed: true,
 			unsigned: { client_id: "678" },
 		});
-		expect(sessionStorage.getItem(EMBED_LAUNCH_FAILED_KEY)).toBeNull();
+		expect(sessionStorage.getItem(EMBED_ISOLATED_KEY)).toBeNull();
 	});
 
 	it("keeps the token and hints across a reload in the same frame", () => {
@@ -273,6 +274,11 @@ describe("consumeEmbedTokenFromHash in an iframe", () => {
 		["an unknown unsigned key", `#embed_token=${APP_TOKEN}&unsigned.agent_id=9`],
 		["an unknown key", `#embed_token=${APP_TOKEN}&foo=1`],
 		["a non-JWT token", "#embed_token=not-a-jwt"],
+		["an undecodable JWT-shaped token", "#embed_token=aaa.bbb.ccc"],
+		["a JWT whose payload is not an object", `#embed_token=${base64Url("{}")}.${base64Url('"embed"')}.c2ln`],
+		["a JWT whose payload is null", `#embed_token=${base64Url("{}")}.${base64Url("null")}.c2ln`],
+		["a JWT without the embed claim", `#embed_token=${jwtFor({ sub: "account" })}`],
+		["a JWT with a non-boolean embed claim", `#embed_token=${jwtFor({ embed: "true" })}`],
 		["a two-segment token", "#embed_token=aaa.bbb"],
 		["a token with base64 padding", "#embed_token=aaa.bbb=.ccc"],
 		["an empty token", "#embed_token="],
@@ -294,7 +300,7 @@ describe("consumeEmbedTokenFromHash in an iframe", () => {
 
 		expect(sessionStorage.getItem(EMBED_TOKEN_KEY)).toBeNull();
 		expect(sessionStorage.getItem(EMBED_LAUNCH_HINTS_KEY)).toBeNull();
-		expect(sessionStorage.getItem(EMBED_LAUNCH_FAILED_KEY)).not.toBeNull();
+		expect(sessionStorage.getItem(EMBED_ISOLATED_KEY)).not.toBeNull();
 		expect(getActiveToken()).toBeNull();
 		expect(isEmbedSession()).toBe(true);
 		expect(isImpersonating()).toBe(false);
@@ -316,6 +322,27 @@ describe("consumeEmbedTokenFromHash in an iframe", () => {
 		expect(localStorage.getItem(ACCESS_TOKEN_KEY)).toBe("user-token");
 	});
 
+	it("stays isolated after a valid embed token is discarded, through a reload", () => {
+		localStorage.setItem(ACCESS_TOKEN_KEY, "user-token");
+		localStorage.setItem(IMPERSONATION_TOKEN_KEY, "impersonation-token");
+		setUrl(`#embed_token=${APP_TOKEN}&unsigned.ticket_id=5`);
+		consumeEmbedTokenFromHash();
+
+		clearAuthTokens();
+		setUrl("");
+		consumeEmbedTokenFromHash();
+
+		expect(sessionStorage.getItem(EMBED_TOKEN_KEY)).toBeNull();
+		expect(sessionStorage.getItem(EMBED_LAUNCH_HINTS_KEY)).toBeNull();
+		expect(getActiveToken()).toBeNull();
+		expect(isEmbedSession()).toBe(true);
+		expect(getEmbedLaunch()).toEqual({ isEmbed: false, unsigned: {} });
+		expect(localStorage.getItem(ACCESS_TOKEN_KEY)).toBe("user-token");
+		expect(localStorage.getItem(IMPERSONATION_TOKEN_KEY)).toBe(
+			"impersonation-token",
+		);
+	});
+
 	it("lets an explicit login clear the failed launch", () => {
 		localStorage.setItem(ACCESS_TOKEN_KEY, "user-token");
 		setUrl("#embed_token=not-a-jwt");
@@ -323,7 +350,7 @@ describe("consumeEmbedTokenFromHash in an iframe", () => {
 
 		clearEmbedToken();
 
-		expect(sessionStorage.getItem(EMBED_LAUNCH_FAILED_KEY)).toBeNull();
+		expect(sessionStorage.getItem(EMBED_ISOLATED_KEY)).toBeNull();
 		expect(isEmbedSession()).toBe(false);
 		expect(getActiveToken()).toBe("user-token");
 	});
@@ -335,7 +362,7 @@ describe("consumeEmbedTokenFromHash in an iframe", () => {
 		setUrl(`#embed_token=${APP_TOKEN}&unsigned.client_id=4`);
 		consumeEmbedTokenFromHash();
 
-		expect(sessionStorage.getItem(EMBED_LAUNCH_FAILED_KEY)).toBeNull();
+		expect(sessionStorage.getItem(EMBED_ISOLATED_KEY)).toBeNull();
 		expect(getActiveToken()).toBe(APP_TOKEN);
 		expect(getEmbedLaunch()).toEqual({
 			isEmbed: true,
@@ -351,7 +378,7 @@ describe("consumeEmbedTokenFromHash in an iframe", () => {
 
 		expect(window.location.hash).toBe("#details");
 		expect(getActiveToken()).toBe(APP_TOKEN);
-		expect(sessionStorage.getItem(EMBED_LAUNCH_FAILED_KEY)).toBeNull();
+		expect(sessionStorage.getItem(EMBED_ISOLATED_KEY)).toBeNull();
 	});
 });
 

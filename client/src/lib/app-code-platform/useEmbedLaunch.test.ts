@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
 	ACCESS_TOKEN_KEY,
-	EMBED_LAUNCH_FAILED_KEY,
+	EMBED_ISOLATED_KEY,
 	EMBED_LAUNCH_HINTS_KEY,
 	EMBED_TOKEN_KEY,
 	consumeEmbedTokenFromHash,
@@ -103,7 +103,7 @@ describe("useEmbedLaunch", () => {
 			EMBED_LAUNCH_HINTS_KEY,
 			JSON.stringify({ ticket_id: "1" }),
 		);
-		sessionStorage.setItem(EMBED_LAUNCH_FAILED_KEY, "1");
+		sessionStorage.setItem(EMBED_ISOLATED_KEY, "1");
 
 		const { result } = renderHook(() => useEmbedLaunch());
 

@@ -28,8 +28,12 @@ export const ACCESS_TOKEN_KEY = "bifrost_access_token";
 export const EMBED_TOKEN_KEY = "bifrost_embed_token";
 /** This tab's unsigned embed launch hints, JSON `{ticket_id?, client_id?}`. */
 export const EMBED_LAUNCH_HINTS_KEY = "bifrost_embed_launch_hints";
-/** Set when this framed tab received a malformed embed fragment. */
-export const EMBED_LAUNCH_FAILED_KEY = "bifrost_embed_launch_failed";
+/**
+ * Set when this framed tab must stay isolated from the ordinary session: its
+ * embed launch was malformed, or its embed capability was discarded (expiry,
+ * rejection or logout). Only an explicit login or a fresh valid launch ends it.
+ */
+export const EMBED_ISOLATED_KEY = "bifrost_embed_isolated";
 /** A short-lived support-session token, isolated to the current browser tab. */
 export const IMPERSONATION_TOKEN_KEY = "bifrost_impersonation_token";
 
@@ -112,8 +116,9 @@ function isEmbedFragment(segments: string[]): boolean {
 
 /**
  * Parse `embed_token=<jwt>` followed by zero or more unsigned hint segments,
- * each key at most once. Returns null for a malformed fragment. A hint whose
- * value is not 1 to 12 ASCII digits is dropped; the token still stands.
+ * each key at most once. Returns null for a malformed fragment, including a
+ * token whose payload is not an embed token's claims. A hint whose value is
+ * not 1 to 12 ASCII digits is dropped; the token still stands.
  */
 function parseEmbedFragment(
 	segments: string[],
@@ -123,6 +128,7 @@ function parseEmbedFragment(
 	if (!first.startsWith(tokenPrefix)) return null;
 	const token = first.slice(tokenPrefix.length);
 	if (!JWT_SHAPE.test(token)) return null;
+	if (parseTokenClaims<EmbedTokenClaims>(token)?.embed !== true) return null;
 
 	const hints: EmbedLaunchHints = {};
 	const seen = new Set<string>();
@@ -146,7 +152,7 @@ function parseEmbedFragment(
 	return { token, hints };
 }
 
-/** Remove this tab's embed capability and hints, keeping any failure marker. */
+/** Remove this tab's embed capability and hints, keeping any isolation marker. */
 function dropEmbedCapability(): void {
 	sessionStorage.removeItem(EMBED_TOKEN_KEY);
 	sessionStorage.removeItem(EMBED_LAUNCH_HINTS_KEY);
@@ -184,16 +190,16 @@ export function consumeEmbedTokenFromHash(): void {
 
 	dropEmbedCapability();
 	if (launch === null) {
-		sessionStorage.setItem(EMBED_LAUNCH_FAILED_KEY, "1");
+		sessionStorage.setItem(EMBED_ISOLATED_KEY, "1");
 		return;
 	}
-	sessionStorage.removeItem(EMBED_LAUNCH_FAILED_KEY);
+	sessionStorage.removeItem(EMBED_ISOLATED_KEY);
 	sessionStorage.setItem(EMBED_TOKEN_KEY, launch.token);
 	sessionStorage.setItem(EMBED_LAUNCH_HINTS_KEY, JSON.stringify(launch.hints));
 }
 
-function embedLaunchFailed(): boolean {
-	return sessionStorage.getItem(EMBED_LAUNCH_FAILED_KEY) !== null;
+function embedIsolated(): boolean {
+	return sessionStorage.getItem(EMBED_ISOLATED_KEY) !== null;
 }
 
 /**
@@ -202,7 +208,7 @@ function embedLaunchFailed(): boolean {
  * frame can change and which must never be used for authorisation.
  */
 export function getEmbedLaunch(): EmbedLaunch {
-	const claims = embedLaunchFailed() ? null : getEmbedTokenClaims();
+	const claims = embedIsolated() ? null : getEmbedTokenClaims();
 	if (claims?.embed !== true || claims.embed_kind !== "app") {
 		return { isEmbed: false, unsigned: {} };
 	}
@@ -228,10 +234,10 @@ export function getEmbedLaunch(): EmbedLaunch {
  * Prefers this tab's embed token, then the browser-wide impersonation token,
  * then the user's normal access token. Embed capability sessions are isolated
  * from support sessions even when the operator starts impersonating elsewhere.
- * A failed embed launch in this tab yields no token at all.
+ * An isolated embed tab yields no token at all.
  */
 export function getActiveToken(): string | null {
-	if (embedLaunchFailed()) return null;
+	if (embedIsolated()) return null;
 	const embed = sessionStorage.getItem(EMBED_TOKEN_KEY);
 	if (embed) return embed;
 	const impersonation = localStorage.getItem(IMPERSONATION_TOKEN_KEY);
@@ -271,22 +277,24 @@ export function getImpersonationTokenClaims(): ImpersonationTokenClaims | null {
 
 /**
  * True when this tab is operating as an embed session (has an embed token
- * in sessionStorage, or a failed embed launch). Used to skip the
- * normal-session refresh flow, which doesn't apply to embed tokens.
+ * in sessionStorage, or is isolated). Used to skip the normal-session refresh
+ * flow, which doesn't apply to embed tokens.
  */
 export function isEmbedSession(): boolean {
-	return sessionStorage.getItem(EMBED_TOKEN_KEY) !== null || embedLaunchFailed();
+	return sessionStorage.getItem(EMBED_TOKEN_KEY) !== null || embedIsolated();
 }
 
 /**
  * Clear this context's access tokens on logout and ordinary hard auth failures.
  * An embed owns only its capability token, so clearing that token never ends a
- * support session that another regular tab started. A failed embed launch
- * stays failed: only an explicit login (`clearEmbedToken`) ends it.
+ * support session that another regular tab started. The embed tab then stays
+ * isolated: only an explicit login (`clearEmbedToken`) or a fresh valid embed
+ * launch ends it, so it never falls back to the shared ordinary session.
  */
 export function clearAuthTokens(): void {
 	if (isEmbedSession()) {
 		dropEmbedCapability();
+		sessionStorage.setItem(EMBED_ISOLATED_KEY, "1");
 		return;
 	}
 	localStorage.removeItem(ACCESS_TOKEN_KEY);
@@ -295,12 +303,12 @@ export function clearAuthTokens(): void {
 }
 
 /**
- * Drop any embed token, launch hints and failed-launch marker from this tab.
+ * Drop any embed token, launch hints and isolation marker from this tab.
  * Called from the regular login flow: if a user explicitly logs in from a tab
  * that previously held an embed token, the new login should win and not be
  * shadowed by sessionStorage.
  */
 export function clearEmbedToken(): void {
 	dropEmbedCapability();
-	sessionStorage.removeItem(EMBED_LAUNCH_FAILED_KEY);
+	sessionStorage.removeItem(EMBED_ISOLATED_KEY);
 }

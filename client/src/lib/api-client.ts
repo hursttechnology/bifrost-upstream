@@ -172,6 +172,9 @@ async function refreshAccessToken(): Promise<boolean> {
 	// operator's cookie here would silently swap an expired impersonation into
 	// the operator identity and could replay a mutation under the wrong user.
 	if (isImpersonating()) return false;
+	// An embed tab (including an isolated one) must never refresh into
+	// the signed-in user's own session through the shared refresh cookie.
+	if (isEmbedSession()) return false;
 	// Use lock to prevent concurrent refresh attempts
 	if (refreshPromise) {
 		return refreshPromise;

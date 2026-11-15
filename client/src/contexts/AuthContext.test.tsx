@@ -1,11 +1,17 @@
 import { act, render, screen } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import { AuthProvider, useAuth } from "./AuthContext";
 import { authFetch } from "@/lib/api-client";
 import {
 	ACCESS_TOKEN_KEY,
+	EMBED_ISOLATED_KEY,
 	IMPERSONATION_TOKEN_KEY,
+	clearEmbedToken,
+	clearImpersonationToken,
+	consumeEmbedTokenFromHash,
+	getActiveToken,
+	isEmbedSession,
 	setImpersonationToken,
 } from "@/lib/auth-token";
 
@@ -219,6 +225,34 @@ it("signs an embed out without clearing shared cookies or browser credentials", 
 	expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/api/auth/logout"))).toBe(false);
 });
 
+it("keeps a failed embed launch signed out without refreshing the user's session", async () => {
+	const userToken = `header.${btoa(JSON.stringify({ sub: "account", email: "account@example.test", exp: Math.floor(Date.now() / 1000) + 3600 }))}.signature`;
+	localStorage.setItem(ACCESS_TOKEN_KEY, userToken);
+	sessionStorage.setItem(EMBED_ISOLATED_KEY, "1");
+	const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+		const url = String(input);
+		if (url.endsWith("/api/auth/refresh")) return Response.json({ access_token: userToken });
+		return Response.json({ needs_setup: false });
+	});
+	vi.stubGlobal("fetch", fetchMock);
+	let auth: ReturnType<typeof useAuth> | undefined;
+	function Probe() {
+		auth = useAuth();
+		return null;
+	}
+	render(<MemoryRouter><AuthProvider><Probe /></AuthProvider></MemoryRouter>);
+	await vi.waitFor(() => expect(auth?.isLoading).toBe(false));
+
+	expect(auth!.user).toBeNull();
+	expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/api/auth/refresh"))).toBe(false);
+
+	act(() => auth!.logout());
+
+	expect(sessionStorage.getItem(EMBED_ISOLATED_KEY)).not.toBeNull();
+	expect(getActiveToken()).toBeNull();
+	expect(localStorage.getItem(ACCESS_TOKEN_KEY)).toBe(userToken);
+});
+
 it("restores the operator token before releasing the override to other tabs", async () => {
 	const restoredToken = `header.${btoa(JSON.stringify({ sub: "operator", email: "operator@example.test", exp: Math.floor(Date.now() / 1000) + 1800 }))}.signature`;
 	localStorage.setItem(ACCESS_TOKEN_KEY, "expired-operator-token");
@@ -256,4 +290,182 @@ it("restores the operator token before releasing the override to other tabs", as
 		remove.mockRestore();
 		Object.defineProperty(window, "location", { configurable: true, value: originalLocation });
 	}
+});
+
+describe("embed isolation through the provider and authFetch", () => {
+	function base64Url(value: string): string {
+		return btoa(value).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+	}
+	function jwtFor(payload: Record<string, unknown>): string {
+		return `${base64Url('{"alg":"HS256"}')}.${base64Url(JSON.stringify(payload))}.c2lnbmF0dXJl`;
+	}
+	const inAnHour = () => Math.floor(Date.now() / 1000) + 3600;
+	const aMinuteAgo = () => Math.floor(Date.now() / 1000) - 60;
+	const ORDINARY = jwtFor({ sub: "account", email: "account@example.test", exp: inAnHour() });
+	const IMPERSONATION = jwtFor({ sub: "target", email: "target@example.test", exp: inAnHour() });
+	const embedToken = (exp: number) =>
+		jwtFor({ sub: "embed", embed: true, embed_kind: "app", grant: "hmac", exp });
+
+	let sent: (string | null)[] = [];
+	let refreshCalls = 0;
+	let unmount: (() => void) | undefined;
+
+	beforeEach(() => {
+		sent = [];
+		refreshCalls = 0;
+		localStorage.setItem(ACCESS_TOKEN_KEY, ORDINARY);
+		setImpersonationToken(IMPERSONATION);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+				const url = input instanceof Request ? input.url : String(input);
+				if (url.endsWith("/auth/status")) return Response.json({ needs_setup: false });
+				if (url.endsWith("/api/auth/refresh")) {
+					refreshCalls += 1;
+					return Response.json({ access_token: ORDINARY });
+				}
+				const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+				sent.push(headers.get("Authorization"));
+				return Response.json({ ok: true });
+			}),
+		);
+	});
+
+	afterEach(() => {
+		unmount?.();
+		unmount = undefined;
+		vi.restoreAllMocks();
+		window.history.replaceState(null, "", "/");
+	});
+
+	function framed(): void {
+		vi.spyOn(window, "top", "get").mockReturnValue({} as Window);
+	}
+
+	function launch(fragment: string): void {
+		window.history.replaceState(null, "", `/apps/heimdall#${fragment}`);
+		consumeEmbedTokenFromHash();
+	}
+
+	async function mountProvider(): Promise<void> {
+		unmount?.();
+		let loading = true;
+		function Probe() {
+			loading = useAuth().isLoading;
+			return null;
+		}
+		unmount = render(<MemoryRouter><AuthProvider><Probe /></AuthProvider></MemoryRouter>).unmount;
+		await vi.waitFor(() => expect(loading).toBe(false));
+	}
+
+	async function lastAuthorization(): Promise<string | null> {
+		await authFetch("/api/workflows/execute", { method: "POST", body: "{}" });
+		return sent[sent.length - 1];
+	}
+
+	async function expectIsolated(): Promise<void> {
+		expect(await lastAuthorization()).toBeNull();
+		expect(getActiveToken()).toBeNull();
+		expect(isEmbedSession()).toBe(true);
+		expect(refreshCalls).toBe(0);
+		expect(localStorage.getItem(ACCESS_TOKEN_KEY)).toBe(ORDINARY);
+		expect(localStorage.getItem(IMPERSONATION_TOKEN_KEY)).toBe(IMPERSONATION);
+	}
+
+	async function reload(): Promise<void> {
+		window.history.replaceState(null, "", "/apps/heimdall");
+		consumeEmbedTokenFromHash();
+		await mountProvider();
+	}
+
+	function failAuthentication(): void {
+		(globalThis as typeof globalThis & {
+			__BIFROST_PLATFORM_AUTH_V1__: { handleAuthenticationFailure: () => void };
+		}).__BIFROST_PLATFORM_AUTH_V1__.handleAuthenticationFailure();
+	}
+
+	it.each([
+		["a malformed JWT-shaped token", () => "embed_token=aaa.bbb.ccc"],
+		["a JWT whose payload is not an embed token", () => `embed_token=${ORDINARY}`],
+		["an expired embed token", () => `embed_token=${embedToken(aMinuteAgo())}`],
+	])("keeps %s isolated after bootstrap and a reload", async (_label, fragment) => {
+		framed();
+		launch(fragment());
+		await mountProvider();
+		await expectIsolated();
+
+		await reload();
+		await expectIsolated();
+	});
+
+	it("keeps a rejected embed token isolated after an auth failure and a reload", async () => {
+		framed();
+		const token = embedToken(inAnHour());
+		launch(`embed_token=${token}`);
+		await mountProvider();
+		expect(await lastAuthorization()).toBe(`Bearer ${token}`);
+
+		act(() => failAuthentication());
+		await expectIsolated();
+
+		await reload();
+		await expectIsolated();
+	});
+
+	it("refuses to end impersonation with the shared operator token", async () => {
+		framed();
+		launch("embed_token=aaa.bbb.ccc");
+		let auth: ReturnType<typeof useAuth> | undefined;
+		function Probe() {
+			auth = useAuth();
+			return null;
+		}
+		unmount = render(<MemoryRouter><AuthProvider><Probe /></AuthProvider></MemoryRouter>).unmount;
+		await vi.waitFor(() => expect(auth?.isLoading).toBe(false));
+
+		await expect(auth!.endImpersonation()).rejects.toThrow();
+		await expect(auth!.refreshToken()).resolves.toBe(false);
+
+		expect(sent).toEqual([]);
+		expect(refreshCalls).toBe(0);
+		expect(localStorage.getItem(IMPERSONATION_TOKEN_KEY)).toBe(IMPERSONATION);
+	});
+
+	it("lets an explicit login end the isolation", async () => {
+		framed();
+		clearImpersonationToken();
+		launch("embed_token=aaa.bbb.ccc");
+		await mountProvider();
+
+		clearEmbedToken();
+
+		expect(isEmbedSession()).toBe(false);
+		expect(await lastAuthorization()).toBe(`Bearer ${ORDINARY}`);
+	});
+
+	it("lets a fresh valid handshake replace an isolated state", async () => {
+		framed();
+		launch(`embed_token=${embedToken(aMinuteAgo())}`);
+		await mountProvider();
+		await expectIsolated();
+
+		const fresh = embedToken(inAnHour());
+		launch(`embed_token=${fresh}`);
+		await mountProvider();
+
+		expect(await lastAuthorization()).toBe(`Bearer ${fresh}`);
+		expect(sessionStorage.getItem(EMBED_ISOLATED_KEY)).toBeNull();
+	});
+
+	it("leaves an ordinary tab and a valid embed launch unchanged", async () => {
+		await mountProvider();
+		expect(await lastAuthorization()).toBe(`Bearer ${IMPERSONATION}`);
+
+		framed();
+		const token = embedToken(inAnHour());
+		launch(`embed_token=${token}`);
+		await mountProvider();
+		expect(await lastAuthorization()).toBe(`Bearer ${token}`);
+		expect(refreshCalls).toBe(0);
+	});
 });

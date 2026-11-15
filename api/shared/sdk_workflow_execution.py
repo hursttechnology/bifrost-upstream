@@ -185,6 +185,10 @@ async def _verified_app_embed_capability(
 
     if request.code is not None or request.run_as is not None:
         raise SdkWorkflowExecutionError(403, "App embeds may only execute workflows")
+    # A delayed run would later execute without the embed marker, so any
+    # schedule (including zero or past values) is refused before insertion.
+    if request.scheduled_at is not None or request.delay_seconds is not None:
+        raise SdkWorkflowExecutionError(422, "App embeds cannot schedule workflow runs")
 
     # A signed app capability is its sole parent attestation.  A body or
     # transport parent can only repeat the signed app's own identity; it can
@@ -340,7 +344,13 @@ async def execute_sdk_workflow(
                 404,
                 {"message": f"Workflow '{request.workflow_id}' not found"},
             ) from None
-    allow_shared_workflow = (
+    # A solution app's embed may start only that solution's own workflows,
+    # whatever its global repo setting. Its own runs keep that setting for
+    # their server-side calls, which arrive with an engine principal.
+    embed_own_solution_only = (
+        app_embed is not None and app_embed.solution_id is not None
+    )
+    allow_shared_workflow = not embed_own_solution_only and (
         solution_scope is None
         or await solution_allows_global(session, solution_scope)
     )
@@ -353,6 +363,15 @@ async def execute_sdk_workflow(
             solution_scope=solution_scope,
             allow_shared_fallback=allow_shared_workflow,
         )
+        if (
+            embed_own_solution_only
+            and app_embed is not None
+            and workflow is not None
+            and workflow.solution_id != app_embed.solution_id
+        ):
+            # Refused exactly like a miss, so the embed learns nothing about
+            # workflows outside its solution.
+            workflow = None
         if not workflow:
             # A resolution miss must identify its scope inputs: a dropped or
             # wrong install scope reads as derived_solution_scope=null here

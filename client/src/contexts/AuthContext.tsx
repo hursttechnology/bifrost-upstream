@@ -252,7 +252,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
 			// Check if token is expired
 			if (isTokenExpired(token)) {
 				if (isEmbedSession()) {
-					clearEmbedToken();
+					clearAuthTokens();
 					setUser(null);
 					setIsLoading(false);
 					return;
@@ -421,7 +421,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
 	// Logout
 	const logout = useCallback(() => {
 		if (isEmbedSession()) {
-			clearEmbedToken();
+			// The tab stays isolated; only an explicit login or a new launch ends it.
+			clearAuthTokens();
 			setUser(null);
 			navigate("/login");
 			return;
@@ -502,6 +503,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
 	);
 
 	const endImpersonation = useCallback(async (): Promise<void> => {
+		if (isEmbedSession()) throw new Error("Embedded views cannot end impersonation");
 		const operator = localStorage.getItem(ACCESS_TOKEN_KEY);
 		if (!operator) throw new Error("Your operator session has expired");
 		const response = await fetch("/api/auth/impersonation/end", {

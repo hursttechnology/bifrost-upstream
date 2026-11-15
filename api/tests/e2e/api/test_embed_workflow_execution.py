@@ -3,9 +3,12 @@
 import hashlib
 import hmac as hmac_module
 import uuid
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 import pytest
+import pytest_asyncio
+from sqlalchemy import delete
 
 from tests.e2e.conftest import poll_until, write_and_register
 
@@ -228,3 +231,123 @@ class TestEmbedWorkflowExecutionCanReadItsOwnResult:
                     f"/api/applications/{session['app']['id']}",
                     headers=platform_admin.headers,
                 )
+
+
+@pytest_asyncio.fixture
+async def solution_app_embed(e2e_client, platform_admin, db_session, org1):
+    """A solution allowing global repo access, an app in it and an embed token.
+
+    Metadata is seeded directly: these cases exercise request resolution
+    through real embed authentication, without a deploy or an app build.
+    """
+    from shared.identities import ensure_default_identity
+    from src.models.orm.applications import Application
+    from src.models.orm.executions import Execution
+    from src.models.orm.organizations import Organization
+    from src.models.orm.solutions import Solution
+    from src.models.orm.workflows import Workflow
+
+    org_id = uuid.UUID(org1["id"])
+    suffix = uuid.uuid4().hex[:10]
+    organization = await db_session.get(Organization, org_id)
+    await ensure_default_identity(db_session, organization)
+    solution = Solution(
+        id=uuid.uuid4(), slug=f"heimdall-{suffix}", name="Heimdall Embed Fixture",
+        organization_id=org_id, allow_inbound_access=True,
+        allow_outbound_access=True,
+    )
+    app = Application(
+        id=uuid.uuid4(), slug=f"heimdall-{suffix}", name="Heimdall Embed Fixture",
+        organization_id=org_id, solution_id=solution.id,
+        app_model="standalone_v2", access_level="authenticated",
+    )
+    own = Workflow(
+        id=uuid.uuid4(), name=f"heimdall_tab_context_{suffix}",
+        path=f"workflows/heimdall_tab_{suffix}.py", function_name="heimdall_tab_context",
+        organization_id=org_id, solution_id=solution.id,
+        access_level="authenticated", type="workflow", is_active=True,
+    )
+    root_org = Workflow(
+        id=uuid.uuid4(), name=f"root_ad_script_{suffix}",
+        path=f"workflows/root_ad_{suffix}.py", function_name="main",
+        organization_id=org_id, access_level="authenticated",
+        type="workflow", is_active=True,
+    )
+    root_global = Workflow(
+        id=uuid.uuid4(), name=f"root_global_script_{suffix}",
+        path=f"workflows/root_global_{suffix}.py", function_name="main",
+        organization_id=None, access_level="everyone",
+        type="workflow", is_active=True,
+    )
+    db_session.add(solution)
+    await db_session.flush()
+    db_session.add_all([app, own, root_org, root_global])
+    await db_session.commit()
+    workflow_ids = [own.id, root_org.id, root_global.id]
+    solution_id = solution.id
+    try:
+        r = e2e_client.post(
+            f"/api/applications/{app.id}/embed-secrets",
+            headers=platform_admin.headers,
+            json={"name": "Test"},
+        )
+        assert r.status_code in (200, 201), r.text
+        raw_secret = r.json()["raw_secret"]
+        params = {"agent_id": "42"}
+        r = e2e_client.get(
+            f"/embed/apps/{app.slug}",
+            params={**params, "hmac": _compute_hmac(params, raw_secret)},
+            follow_redirects=False,
+        )
+        assert r.status_code == 302, r.text
+        yield SimpleNamespace(
+            headers={"Authorization": f"Bearer {_extract_token_from_redirect(r)}"},
+            own=own,
+            root_org=root_org,
+            root_global=root_global,
+        )
+    finally:
+        await db_session.rollback()
+        await db_session.execute(delete(Execution).where(Execution.workflow_id.in_(workflow_ids)))
+        await db_session.execute(delete(Workflow).where(Workflow.id.in_(workflow_ids)))
+        await db_session.execute(delete(Application).where(Application.solution_id == solution_id))
+        await db_session.execute(delete(Solution).where(Solution.id == solution_id))
+        await db_session.commit()
+
+
+def _ref(workflow, kind: str) -> str:
+    if kind == "uuid":
+        return str(workflow.id)
+    if kind == "name":
+        return workflow.name
+    return f"{workflow.path}::{workflow.function_name}"
+
+
+@pytest.mark.e2e
+@pytest.mark.usefixtures("secrets_reader_platform_admin")
+class TestSolutionAppEmbedRunsOnlyItsOwnWorkflows:
+    """A solution app's embed reaches only that solution's workflows, even
+    when the solution allows global repo access."""
+
+    @pytest.mark.parametrize("kind", ["uuid", "name", "path"])
+    @pytest.mark.parametrize("root", ["root_org", "root_global"])
+    def test_root_workflows_are_refused(self, e2e_client, solution_app_embed, root, kind):
+        ref = _ref(getattr(solution_app_embed, root), kind)
+        r = e2e_client.post(
+            "/api/workflows/execute",
+            headers=solution_app_embed.headers,
+            json={"workflow_id": ref, "input_data": {}},
+        )
+        assert r.status_code == 404, r.text
+        assert r.json()["detail"]["message"] == f"Workflow '{ref}' not found"
+
+    def test_own_solution_workflow_is_admitted(self, e2e_client, solution_app_embed):
+        # One representative admission. The run is queued but not awaited:
+        # the fixture seeds metadata only, and refusals happen before enqueue.
+        r = e2e_client.post(
+            "/api/workflows/execute",
+            headers=solution_app_embed.headers,
+            json={"workflow_id": solution_app_embed.own.name, "input_data": {}},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["workflow_id"] == str(solution_app_embed.own.id)

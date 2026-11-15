@@ -34,6 +34,7 @@ export {
 
 // User context
 export { useUser } from "./useUser";
+export { useEmbedLaunch } from "./useEmbedLaunch";
 
 // App state
 export {

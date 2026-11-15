@@ -53,7 +53,7 @@ PLATFORM_EXPORT_NAMES: frozenset[str] = frozenset({
     "UNSAFE_DataRouterContext", "UNSAFE_DataRouterStateContext",
     "UNSAFE_NavigationContext", "UNSAFE_LocationContext", "UNSAFE_RouteContext",
     # Platform
-    "useUser", "useAppState",
+    "useUser", "useEmbedLaunch", "useAppState",
     "useWorkflowQuery", "useWorkflowMutation",
     "RequireRole",
     # Tables SDK

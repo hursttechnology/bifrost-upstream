@@ -9575,6 +9575,20 @@
     "mcp_tool": null,
     "method": "GET",
     "operation_id": null,
+    "path": "/embed/apps/{slug}/frame-policy",
+    "permission": null,
+    "reason": "Public/unauthenticated entry point (login, OAuth/device flow, health, CLI download, or inbound webhook)."
+  },
+  {
+    "access_class": "public",
+    "boundary": null,
+    "current_gate": "none",
+    "inline_checks": [],
+    "inline_effect": null,
+    "intended_change": null,
+    "mcp_tool": null,
+    "method": "GET",
+    "operation_id": null,
     "path": "/embed/forms/hmac/{form_id}/frame-policy",
     "permission": null,
     "reason": "Public/unauthenticated entry point (login, OAuth/device flow, health, CLI download, or inbound webhook)."

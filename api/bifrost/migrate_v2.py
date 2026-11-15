@@ -76,7 +76,7 @@ _BIFROST_KEEP = frozenset({
     "BifrostProvider", "BifrostHeader", "useBifrostContext",
     # v1 platform hooks with no v2 SDK equivalent yet — keep so the build fails
     # loudly (a real "port this" signal) rather than silently mis-routing.
-    "useUser", "useAppState", "RequireRole",
+    "useUser", "useEmbedLaunch", "useAppState", "RequireRole",
 })
 
 # cn / formatters → @/lib/utils (the scaffold ships cn there; format helpers are

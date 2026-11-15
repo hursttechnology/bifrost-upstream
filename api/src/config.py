@@ -7,9 +7,11 @@ All configuration is centralized here for easy management.
 
 from functools import lru_cache
 from pathlib import Path
+import re
 from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import Field, computed_field
+from pydantic import Field, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -261,6 +263,30 @@ class Settings(BaseSettings):
         default=False,
         description="If True, require MFA even for OAuth users"
     )
+
+    embed_app_frame_ancestors: dict[str, str] = Field(
+        default_factory=lambda: {"heimdall": "https://support.hurst.technology"},
+        description="App slug to space-separated HTTPS framing origins or 'self'",
+    )
+
+    @field_validator("embed_app_frame_ancestors")
+    @classmethod
+    def validate_embed_app_frame_ancestors(cls, policies: dict[str, str]) -> dict[str, str]:
+        """Accept only app slugs and origin sources, never arbitrary CSP text."""
+        hostname = r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
+        origin = rf"https://(?:{hostname}(?:\.{hostname})*|\[[0-9a-fA-F:.]+\])(?::[0-9]+)?"
+        for slug, sources in policies.items():
+            if len(slug) > 255 or not re.fullmatch(r"[a-z][a-z0-9-]*", slug):
+                raise ValueError("Invalid app slug in framing policy")
+            for source in sources.split(" "):
+                if source == "'self'":
+                    continue
+                if not re.fullmatch(origin, source):
+                    raise ValueError("Framing sources must be HTTPS origins or 'self'")
+                # urlsplit also validates bracketed IPv6 hosts and port range.
+                if urlsplit(source).port == 0:
+                    raise ValueError("Framing origin port must be between 1 and 65535")
+        return policies
 
     # ==========================================================================
     # CORS

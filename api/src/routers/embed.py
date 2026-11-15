@@ -1,6 +1,7 @@
 """Public embed entry point — HMAC-verified iframe loading."""
 
 import logging
+import re
 from datetime import timedelta
 from urllib.parse import urlencode
 
@@ -9,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from starlette.responses import RedirectResponse
 
+from src.config import get_settings
 from src.core.database import get_db_context
 from src.core.rate_limit import RateLimiter, get_client_ip
 from src.core.security import create_embed_access_token, decrypt_secret
@@ -33,6 +35,27 @@ _FORM_PRESENTATION_VALUES = {
     "header": {"true", "false"},
     "background": {"solid", "transparent"},
 }
+
+
+# Unsigned launch hints an app embed passes to its page, in fragment order.
+# They are not covered by the signature, so they never enter the token.
+_APP_UNSIGNED_HINT_KEYS = ("ticket_id", "client_id")
+_APP_UNSIGNED_HINT_VALUE = re.compile(r"[0-9]{1,12}")
+
+
+def _app_unsigned_hint_fragment(request: Request) -> str:
+    """Return the ``&unsigned.<key>=<digits>`` fragment suffix for an app embed.
+
+    A hint passes only when it appears exactly once and is 1 to 12 ASCII
+    digits; anything else is silently dropped.
+    """
+
+    suffix = ""
+    for key in _APP_UNSIGNED_HINT_KEYS:
+        values = request.query_params.getlist(key)
+        if len(values) == 1 and _APP_UNSIGNED_HINT_VALUE.fullmatch(values[0]):
+            suffix += f"&unsigned.{key}={values[0]}"
+    return suffix
 
 
 def _form_presentation_query(query_params: dict[str, str]) -> str:
@@ -171,15 +194,30 @@ async def embed_app(
     # keeping the token client-side only. This avoids cross-origin cookie
     # issues when third-party sites embed Bifrost apps in iframes.
     redirect = RedirectResponse(
-        url=f"/apps/{app.slug}#embed_token={access_token}",
+        url=(
+            f"/apps/{app.slug}#embed_token={access_token}"
+            f"{_app_unsigned_hint_fragment(request)}"
+        ),
         status_code=302,
     )
 
-    # Set permissive framing headers for embed route
-    redirect.headers["Content-Security-Policy"] = "frame-ancestors *"
-    redirect.headers["X-Frame-Options"] = "ALLOWALL"
+    ancestors = get_settings().embed_app_frame_ancestors.get(app.slug)
+    if ancestors is not None:
+        redirect.headers["Content-Security-Policy"] = f"frame-ancestors {ancestors}"
+    else:
+        redirect.headers["Content-Security-Policy"] = "frame-ancestors *"
+        redirect.headers["X-Frame-Options"] = "ALLOWALL"
 
     return redirect
+
+
+@router.get("/apps/{slug}/frame-policy", include_in_schema=False)
+async def app_frame_policy(slug: str = Path(...)) -> Response:
+    """Resolve the final app document's framing policy without database access."""
+    ancestors = get_settings().embed_app_frame_ancestors.get(slug)
+    if ancestors is None:
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+    return _frame_policy_response(ancestors)
 
 
 @router.get("/forms/public/{public_key}")

@@ -25,7 +25,7 @@ insert, cancel) clean up their rows explicitly.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
@@ -164,6 +164,7 @@ async def _seed_workflow(db_session, name, *, org_id=None, **kwargs):
         path=kwargs.get("path", f"workflows/{name}.py"),
         type=kwargs.get("type", "workflow"),
         organization_id=org_id,
+        solution_id=kwargs.get("solution_id"),
         is_active=kwargs.get("is_active", True),
         access_level=kwargs.get("access_level", "authenticated"),
         cache_ttl_seconds=kwargs.get("cache_ttl_seconds", 0),
@@ -171,6 +172,31 @@ async def _seed_workflow(db_session, name, *, org_id=None, **kwargs):
     db_session.add(row)
     await db_session.flush()
     return row
+
+
+async def _seed_solution(db_session, org_id, *, global_repo_access=True, **kwargs):
+    from src.models.orm.solutions import Solution
+
+    row = Solution(
+        id=uuid4(),
+        slug=f"sdk-wfexec-sol-{uuid4().hex[:8]}",
+        name=kwargs.get("name", "SDK WfExec solution"),
+        organization_id=org_id,
+        allow_outbound_access=global_repo_access,
+        allow_inbound_access=kwargs.get("allow_inbound_access", True),
+    )
+    db_session.add(row)
+    await db_session.flush()
+    return row
+
+
+def _workflow_ref(workflow, kind: str) -> str:
+    """The three ways app code can name a workflow."""
+    if kind == "uuid":
+        return str(workflow.id)
+    if kind == "name":
+        return workflow.name
+    return f"{workflow.path}::{workflow.function_name}"
 
 
 async def _seed_app(db_session, *, org_id=None, solution_id=None):
@@ -206,6 +232,46 @@ def _app_embed_principal(app) -> UserPrincipal:
         embed_kind="app",
         app_id=str(app.id),
     )
+
+
+def _engine_principal(
+    org_id, person_id, parent_id, workflow_id, *, solution_id=None
+) -> UserPrincipal:
+    """A workflow child's runtime principal, as ``runtime_auth`` builds it."""
+    from src.core.constants import SYSTEM_USER_ID
+    from src.models.contracts.workflow_permissions import WorkflowPermissionMode
+    from src.services.authorization.explain import Powers, RunUser
+    from src.services.authorization.runtime import RuntimeAuthority
+
+    engine = UserPrincipal(
+        user_id=UUID(SYSTEM_USER_ID),
+        email="engine@internal",
+        organization_id=org_id,
+        is_superuser=True,
+        engine_execution_id=str(parent_id),
+        engine_solution_id=None if solution_id is None else str(solution_id),
+        run_user_id=person_id,
+    )
+    context = AuthorizationContext(
+        user_id=person_id,
+        home_organization_id=org_id,
+        base_role_id=uuid4(),
+        is_external=False,
+        base_permissions=frozenset({"workflows.execute"}),
+    )
+    engine.runtime_authority = RuntimeAuthority(
+        kind="workflow_execution",
+        credential_id=uuid4(),
+        run_user=RunUser(person_id, context, None, is_active=True),
+        powers=Powers(WorkflowPermissionMode.FULL, ()),
+        acting_user_id=person_id,
+        organization_id=org_id,
+        workflow_id=workflow_id,
+        started_by_user_id=person_id,
+        root_execution_id=parent_id,
+        solution_id=solution_id,
+    )
+    return engine
 
 
 async def _seed_execution(db_session, name, *, user_id, org_id=None, **kwargs):
@@ -525,11 +591,22 @@ class TestAppEmbedCapability:
         assert context.user_id == str(identity.id)
         assert context.org_id == str(org.id)
 
-    async def test_bound_app_scheduling_records_its_default_identity(self, db_session):
+    @pytest.mark.parametrize(
+        "schedule",
+        [
+            {"delay_seconds": 0},
+            {"delay_seconds": 60},
+            {"scheduled_at": datetime(2020, 1, 1, tzinfo=timezone.utc)},
+            {"scheduled_at": datetime.now(timezone.utc) + timedelta(hours=1)},
+        ],
+        ids=["delay-zero", "delay-60", "past-scheduled-at", "future-scheduled-at"],
+    )
+    async def test_bound_app_cannot_schedule_a_run(self, db_session, schedule):
+        from src.models import WorkflowExecutionRequest
         from src.models.orm.executions import Execution
 
         org = await _seed_org(db_session)
-        identity = await _ensure_default_identity(db_session, org)
+        await _ensure_default_identity(db_session, org)
         app = await _seed_app(db_session, org_id=org.id)
         workflow = await _seed_workflow(
             db_session,
@@ -537,19 +614,84 @@ class TestAppEmbedCapability:
             org_id=org.id,
             access_level="authenticated",
         )
-
-        result = await execute_sdk_workflow(
-            db_session,
-            _app_embed_principal(app),
-            _request(
-                workflow_id=str(workflow.id), input_data={}, delay_seconds=60
-            ),
-            caller_org_id=None,
+        # model_construct skips the contract validators, so zero and past
+        # values reach the service exactly as an unvalidated caller's would.
+        request = WorkflowExecutionRequest.model_construct(
+            workflow_id=str(workflow.id),
+            input_data={},
+            code=None,
+            run_as=None,
+            form_id=None,
+            app_id=None,
+            solution_id=None,
+            caller_solution_id=None,
+            org_id=None,
+            transient=False,
+            sync=False,
+            scheduled_at=schedule.get("scheduled_at"),
+            delay_seconds=schedule.get("delay_seconds"),
         )
+        insert = AsyncMock()
+        patches = (
+            *_patch_dispatch(),
+            patch("shared.sdk_workflow_execution.insert_scheduled_execution", insert),
+        )
+        mocks = _start_patches(patches)
+        try:
+            with pytest.raises(SdkWorkflowExecutionError) as exc_info:
+                await execute_sdk_workflow(
+                    db_session,
+                    _app_embed_principal(app),
+                    request,
+                    caller_org_id=None,
+                )
+        finally:
+            _stop_patches(patches)
 
-        row = await db_session.get(Execution, UUID(result.execution_id))
-        assert row is not None
-        assert row.executed_by == identity.id
+        assert exc_info.value.status_code == 422
+        assert exc_info.value.detail == "App embeds cannot schedule workflow runs"
+        insert.assert_not_awaited()
+        for mock in (mocks[0], mocks[1], mocks[3], mocks[4]):
+            mock.assert_not_awaited()  # run_workflow, run_code, publishes
+        rows = (
+            await db_session.execute(
+                select(Execution).where(Execution.workflow_id == workflow.id)
+            )
+        ).scalars().all()
+        assert rows == []
+
+    async def test_bound_app_immediate_run_still_dispatches(self, db_session):
+        from src.models.orm.executions import Execution
+
+        org = await _seed_org(db_session)
+        await _ensure_default_identity(db_session, org)
+        app = await _seed_app(db_session, org_id=org.id)
+        workflow = await _seed_workflow(
+            db_session,
+            f"app-embed-now-{uuid4().hex[:8]}",
+            org_id=org.id,
+            access_level="authenticated",
+        )
+        patches = _patch_dispatch()
+        mocks = _start_patches(patches)
+        try:
+            result = await execute_sdk_workflow(
+                db_session,
+                _app_embed_principal(app),
+                _request(workflow_id=str(workflow.id), input_data={}),
+                caller_org_id=None,
+            )
+        finally:
+            _stop_patches(patches)
+
+        assert result.status == ExecutionStatus.PENDING
+        mocks[0].assert_awaited_once()
+        scheduled = (
+            await db_session.execute(
+                select(Execution).where(Execution.workflow_id == workflow.id)
+            )
+        ).scalars().all()
+        assert scheduled == []
 
     async def test_bound_app_refuses_a_forged_parent_app_before_dispatch(self, db_session):
         org = await _seed_org(db_session)
@@ -641,6 +783,330 @@ class TestAppEmbedCapability:
             )
 
         assert exc_info.value.status_code == 404
+
+
+_REF_KINDS = ("uuid", "name", "path")
+
+
+def _unique_stem(prefix: str) -> str:
+    return f"{prefix}_{uuid4().hex[:8]}"
+
+
+@pytest.mark.asyncio
+class TestAppEmbedOwnSolutionLimit:
+    """A solution app's embed may start only that solution's workflows.
+
+    The solution allows global repo access throughout, so every refusal here
+    comes from the embed limit rather than the solution's own setting.
+    Server-side calls from the solution's runs keep their reach.
+    """
+
+    async def _heimdall(self, db_session):
+        org = await _seed_org(db_session)
+        await _ensure_default_identity(db_session, org)
+        solution = await _seed_solution(db_session, org.id, global_repo_access=True)
+        app = await _seed_app(db_session, org_id=org.id, solution_id=solution.id)
+        return org, solution, app
+
+    async def _embed_run(self, db_session, app, ref):
+        patches = _patch_dispatch()
+        mocks = _start_patches(patches)
+        try:
+            result = await execute_sdk_workflow(
+                db_session,
+                _app_embed_principal(app),
+                _request(workflow_id=ref, input_data={}),
+                caller_org_id=None,
+            )
+        finally:
+            _stop_patches(patches)
+        return result, mocks[0]
+
+    async def _assert_embed_refused(self, db_session, app, ref):
+        patches = _patch_dispatch()
+        mocks = _start_patches(patches)
+        try:
+            with pytest.raises(SdkWorkflowExecutionError) as exc_info:
+                await execute_sdk_workflow(
+                    db_session,
+                    _app_embed_principal(app),
+                    _request(workflow_id=ref, input_data={}),
+                    caller_org_id=None,
+                )
+        finally:
+            _stop_patches(patches)
+        assert exc_info.value.status_code == 404
+        # Indistinguishable from a workflow that does not exist.
+        assert exc_info.value.detail["message"] == f"Workflow '{ref}' not found"
+        mocks[0].assert_not_awaited()  # run_workflow
+
+    @pytest.mark.parametrize("kind", _REF_KINDS)
+    @pytest.mark.parametrize("access_level", ["authenticated", "everyone"])
+    @pytest.mark.parametrize("scope", ["org", "global"])
+    async def test_root_workflows_are_refused(self, db_session, kind, access_level, scope):
+        org, _solution, app = await self._heimdall(db_session)
+        stem = _unique_stem("root_ad_script")
+        root = await _seed_workflow(
+            db_session,
+            stem,
+            org_id=org.id if scope == "org" else None,
+            access_level=access_level,
+            path=f"workflows/{stem}.py",
+            function_name="main",
+        )
+
+        await self._assert_embed_refused(db_session, app, _workflow_ref(root, kind))
+
+    @pytest.mark.parametrize("kind", _REF_KINDS)
+    async def test_own_solution_workflow_runs(self, db_session, kind):
+        org, solution, app = await self._heimdall(db_session)
+        own = await _seed_workflow(
+            db_session,
+            "heimdall_tab_context",
+            org_id=org.id,
+            solution_id=solution.id,
+            access_level="authenticated",
+            path="workflows/heimdall_tab.py",
+            function_name="heimdall_tab_context",
+        )
+
+        result, run_workflow = await self._embed_run(
+            db_session, app, _workflow_ref(own, kind)
+        )
+
+        assert result.status == ExecutionStatus.PENDING
+        run_workflow.assert_awaited_once()
+        assert run_workflow.call_args.kwargs["workflow_id"] == str(own.id)
+        context = run_workflow.call_args.kwargs["context"]
+        assert context.solution_id == str(solution.id)
+
+    @pytest.mark.parametrize("kind", _REF_KINDS)
+    async def test_own_workflow_wins_over_a_root_workflow_of_the_same_name(
+        self, db_session, kind
+    ):
+        org, solution, app = await self._heimdall(db_session)
+        stem = _unique_stem("heimdall_tab_context")
+        await _seed_workflow(
+            db_session,
+            stem,
+            org_id=org.id,
+            path=f"workflows/{stem}.py",
+            function_name="main",
+        )
+        own = await _seed_workflow(
+            db_session,
+            stem,
+            org_id=org.id,
+            solution_id=solution.id,
+            path=f"workflows/{stem}.py",
+            function_name="main",
+        )
+
+        _result, run_workflow = await self._embed_run(
+            db_session, app, _workflow_ref(own, kind)
+        )
+
+        assert run_workflow.call_args.kwargs["workflow_id"] == str(own.id)
+
+    @pytest.mark.parametrize("kind", _REF_KINDS)
+    async def test_sibling_solution_workflow_is_refused(self, db_session, kind):
+        org, _solution, app = await self._heimdall(db_session)
+        sibling = await _seed_solution(db_session, org.id, global_repo_access=True)
+        stem = _unique_stem("slack_agents_post")
+        theirs = await _seed_workflow(
+            db_session,
+            stem,
+            org_id=org.id,
+            solution_id=sibling.id,
+            path=f"workflows/{stem}.py",
+            function_name="main",
+        )
+
+        await self._assert_embed_refused(db_session, app, _workflow_ref(theirs, kind))
+
+    async def test_sibling_solution_cannot_be_selected_by_the_request(self, db_session):
+        org, _solution, app = await self._heimdall(db_session)
+        sibling = await _seed_solution(db_session, org.id, global_repo_access=True)
+        theirs = await _seed_workflow(
+            db_session,
+            _unique_stem("slack_agents_post"),
+            org_id=org.id,
+            solution_id=sibling.id,
+        )
+
+        with pytest.raises(SdkWorkflowExecutionError) as exc_info:
+            await execute_sdk_workflow(
+                db_session,
+                _app_embed_principal(app),
+                _request(
+                    workflow_id=theirs.name,
+                    input_data={},
+                    solution_id=str(sibling.id),
+                ),
+                caller_org_id=None,
+            )
+
+        assert exc_info.value.status_code == 404
+
+    async def test_resolver_never_offers_the_shared_fallback(self, db_session):
+        """The limit holds whatever the solution's global repo setting says."""
+        from src.repositories import WorkflowRepository
+
+        org, solution, app = await self._heimdall(db_session)
+        own = await _seed_workflow(
+            db_session,
+            _unique_stem("heimdall_tab_context"),
+            org_id=org.id,
+            solution_id=solution.id,
+        )
+        calls: list[dict] = []
+        real_resolve = WorkflowRepository.resolve
+
+        async def spy(self, identifier, **kwargs):
+            calls.append(kwargs)
+            return await real_resolve(self, identifier, **kwargs)
+
+        with patch.object(WorkflowRepository, "resolve", spy):
+            await self._embed_run(db_session, app, str(own.id))
+
+        assert calls == [
+            {"solution_scope": solution.id, "allow_shared_fallback": False}
+        ]
+
+    async def test_a_workflow_from_outside_the_solution_is_refused_after_resolution(
+        self, db_session
+    ):
+        """Even if resolution returned a root row, the embed does not run it."""
+        from src.repositories import WorkflowRepository
+
+        org, _solution, app = await self._heimdall(db_session)
+        root = await _seed_workflow(
+            db_session, _unique_stem("root_ad_script"), org_id=org.id
+        )
+
+        with patch.object(
+            WorkflowRepository, "resolve", AsyncMock(return_value=root)
+        ):
+            await self._assert_embed_refused(db_session, app, str(root.id))
+
+    @pytest.mark.parametrize("kind", _REF_KINDS)
+    async def test_non_solution_app_keeps_its_reach(self, db_session, kind):
+        org = await _seed_org(db_session)
+        await _ensure_default_identity(db_session, org)
+        app = await _seed_app(db_session, org_id=org.id)
+        stem = _unique_stem("root_ad_script")
+        root = await _seed_workflow(
+            db_session,
+            stem,
+            org_id=org.id,
+            path=f"workflows/{stem}.py",
+            function_name="main",
+        )
+
+        _result, run_workflow = await self._embed_run(
+            db_session, app, _workflow_ref(root, kind)
+        )
+
+        assert run_workflow.call_args.kwargs["workflow_id"] == str(root.id)
+
+    async def _solution_child(self, db_session, org, solution):
+        """An engine principal for a run of ``solution``'s own workflow."""
+        person = await _seed_user(db_session, org_id=org.id)
+        parent_workflow = await _seed_workflow(
+            db_session,
+            _unique_stem("heimdall_start_grant"),
+            org_id=org.id,
+            solution_id=solution.id,
+        )
+        parent = await _seed_execution(
+            db_session,
+            parent_workflow.name,
+            user_id=person.id,
+            org_id=org.id,
+            workflow_id=parent_workflow.id,
+            status=ExecutionStatus.RUNNING,
+        )
+        parent.run_user_id = person.id
+        parent.started_by_user_id = person.id
+        await db_session.flush()
+        return _engine_principal(
+            org.id, person.id, parent.id, parent_workflow.id, solution_id=solution.id
+        )
+
+    async def _child_run(self, db_session, engine, org, request):
+        patches = _patch_dispatch()
+        mocks = _start_patches(patches)
+        try:
+            result = await execute_sdk_workflow(
+                db_session, engine, request, caller_org_id=org.id
+            )
+        finally:
+            _stop_patches(patches)
+        return result, mocks[0]
+
+    @pytest.mark.parametrize("kind", _REF_KINDS)
+    async def test_solution_run_still_reaches_a_root_script(self, db_session, kind):
+        """A Heimdall workflow calling a root AD script server-side."""
+        org, solution, _app = await self._heimdall(db_session)
+        stem = _unique_stem("root_ad_script")
+        root = await _seed_workflow(
+            db_session,
+            stem,
+            org_id=org.id,
+            path=f"workflows/{stem}.py",
+            function_name="main",
+        )
+        engine = await self._solution_child(db_session, org, solution)
+
+        # The SDK sends the run's own install as both target and caller.
+        result, run_workflow = await self._child_run(
+            db_session,
+            engine,
+            org,
+            _request(
+                workflow_id=_workflow_ref(root, kind),
+                input_data={},
+                solution_id=str(solution.id),
+                caller_solution_id=str(solution.id),
+            ),
+        )
+
+        assert engine.embed is False
+        assert result.status == ExecutionStatus.PENDING
+        assert run_workflow.call_args.kwargs["workflow_id"] == str(root.id)
+
+    @pytest.mark.parametrize("kind", _REF_KINDS)
+    async def test_solution_run_still_calls_another_solution(self, db_session, kind):
+        """A Heimdall workflow calling a Slack Agents workflow server-side."""
+        org, solution, _app = await self._heimdall(db_session)
+        slack_agents = await _seed_solution(
+            db_session, org.id, global_repo_access=False, allow_inbound_access=True
+        )
+        stem = _unique_stem("slack_agents_post")
+        theirs = await _seed_workflow(
+            db_session,
+            stem,
+            org_id=org.id,
+            solution_id=slack_agents.id,
+            path=f"workflows/{stem}.py",
+            function_name="main",
+        )
+        engine = await self._solution_child(db_session, org, solution)
+
+        result, run_workflow = await self._child_run(
+            db_session,
+            engine,
+            org,
+            _request(
+                workflow_id=_workflow_ref(theirs, kind),
+                input_data={},
+                solution_id=str(slack_agents.id),
+                caller_solution_id=str(solution.id),
+            ),
+        )
+
+        assert result.status == ExecutionStatus.PENDING
+        assert run_workflow.call_args.kwargs["workflow_id"] == str(theirs.id)
 
 
 @pytest.mark.asyncio
@@ -835,6 +1301,36 @@ class TestExecuteScheduling:
             delete(ExecutionModel).where(ExecutionModel.id == row.id)
         )
         await db_session.commit()
+
+    async def test_a_workflow_child_can_still_schedule_a_run(self, db_session):
+        """Server-side scheduling (e.g. a solution's own start/end grant runs)
+        reaches the service with an engine principal, never an embed one."""
+        from src.models.orm.executions import Execution as ExecutionModel
+
+        org = await _seed_org(db_session)
+        person = await _seed_user(db_session, org_id=org.id)
+        parent = await _seed_execution(
+            db_session, "parent", user_id=person.id, org_id=org.id
+        )
+        parent.run_user_id = person.id
+        parent.started_by_user_id = person.id
+        await db_session.flush()
+        wf = await _seed_workflow(db_session, f"wf-{uuid4().hex[:8]}", org_id=org.id)
+        engine = _engine_principal(org.id, person.id, parent.id, wf.id)
+
+        result = await execute_sdk_workflow(
+            db_session,
+            engine,
+            _request(workflow_id=str(wf.id), input_data={}, delay_seconds=60),
+            caller_org_id=org.id,
+        )
+
+        assert engine.embed is False
+        assert result.status == ExecutionStatus.SCHEDULED
+        row = await db_session.get(ExecutionModel, UUID(result.execution_id))
+        assert row is not None
+        assert row.status == ExecutionStatus.SCHEDULED
+        assert row.workflow_id == wf.id
 
     async def test_run_as_applies_to_scheduled_row(self, db_session):
         from src.models.orm.executions import Execution as ExecutionModel

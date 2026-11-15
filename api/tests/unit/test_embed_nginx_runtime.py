@@ -1,0 +1,317 @@
+"""Serve the real client/nginx.conf with a real nginx binary.
+
+Only environment details are substituted: a loopback listen port, a temporary
+document root and logs, a loopback upstream that answers through the real embed
+router (with the synthetic fixtures of test_embed_app_redirect) or, for the
+upstream-failure cases, a closed loopback port, and no gzip (the test binary
+is built without it). Set BIFROST_TEST_NGINX to the binary.
+
+Log lines and the signed fixture are never printed: every log assertion is
+reduced to a boolean or a count before it is asserted.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import http.client
+import os
+import socket
+import subprocess
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+
+from tests.unit.routers.test_embed_app_redirect import _app_row, _client, _halo_hmac
+
+NGINX = os.environ.get("BIFROST_TEST_NGINX", "")
+pytestmark = pytest.mark.skipif(
+    not (NGINX and os.path.isfile(NGINX) and os.access(NGINX, os.X_OK)),
+    reason="BIFROST_TEST_NGINX is unset or not an executable nginx binary",
+)
+
+CONF = Path(__file__).resolve().parents[3] / "client/nginx.conf"
+DOCUMENT = b"<!doctype html><title>offline document marker</title>"
+ASSET = b"console.log('asset marker');"
+HEIMDALL_POLICY = "frame-ancestors https://support.hurst.technology"
+SIGNED_HMAC = _halo_hmac("7")
+SIGNED_QUERY = f"agent_id=7&hmac={SIGNED_HMAC}"
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class _Proxy:
+    def __init__(self, port: int, access_log: Path, error_log: Path):
+        self.port = port
+        self.access_log = access_log
+        self.error_log = error_log
+
+    def get(self, target: str, headers: dict[str, str] | None = None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            conn.request("GET", target, headers=headers or {})
+            response = conn.getresponse()
+            # response.headers looks names up case-insensitively.
+            return response.status, response.headers, response.read()
+        finally:
+            conn.close()
+
+    def log_line(self, agent: str) -> str:
+        """The access-log line for one request, found by its User-Agent."""
+        marker = f'"{agent}"'
+        for _ in range(50):
+            lines = [line for line in self.access_log.read_text().splitlines() if marker in line]
+            if lines:
+                assert len(lines) == 1, f"{len(lines)} log lines for {agent}"
+                return lines[0]
+            time.sleep(0.02)
+        raise AssertionError(f"no access-log line for {agent}")
+
+
+@contextlib.contextmanager
+def _serve_nginx(base: Path, upstream_port: int):
+    """Run the real config against a loopback upstream, logging under base.
+
+    The main error log runs at info, so a request message that escaped the
+    server's own error_log level would still land in error.log.
+    """
+    port = _free_port()
+    access_log, error_log = base / "access.log", base / "error.log"
+    conf = CONF.read_text()
+    for old, new in (
+        ("listen 80;", f"listen 127.0.0.1:{port};"),
+        ("root /usr/share/nginx/html;", f"root {base / 'html'};"),
+        ("http://api:8000", f"http://127.0.0.1:{upstream_port}"),
+        ("/var/log/nginx/access.log", str(access_log)),
+        ("/var/log/nginx/error.log", str(error_log)),
+    ):
+        assert old in conf, old
+        conf = conf.replace(old, new)
+    conf = "\n".join(
+        line for line in conf.splitlines() if not line.strip().startswith(("gzip ", "gzip_"))
+    )
+    config = base / "nginx.conf"
+    config.write_text(
+        f"daemon off;\npid {base / 'nginx.pid'};\nerror_log {error_log} info;\n"
+        f"events {{}}\nhttp {{\n{conf}\n}}\n"
+    )
+    command = [NGINX, "-p", f"{base}/", "-c", str(config)]
+    syntax = subprocess.run([*command, "-t"], capture_output=True, text=True)
+    assert syntax.returncode == 0, syntax.stderr
+
+    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(250):
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    break
+            except OSError:
+                time.sleep(0.02)
+        else:
+            raise AssertionError("nginx did not start listening")
+        yield _Proxy(port, access_log, error_log)
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+
+@pytest.fixture(scope="module")
+def proxy(tmp_path_factory):
+    base = tmp_path_factory.mktemp("nginx")
+    (base / "html/assets").mkdir(parents=True)
+    (base / "html/index.html").write_bytes(DOCUMENT)
+    (base / "html/assets/app.js").write_bytes(ASSET)
+
+    patch = pytest.MonkeyPatch()
+    client = _client(patch, _app_row("heimdall"))
+    lock = threading.Lock()
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            # The base keeps a raw path such as //embed/... a path, not a host.
+            with lock:
+                response = client.get(f"http://testserver{self.path}", follow_redirects=False)
+            self.send_response(response.status_code)
+            for key, value in response.headers.items():
+                if key.lower() not in {"content-length", "connection", "transfer-encoding"}:
+                    self.send_header(key, value)
+            self.send_header("Content-Length", str(len(response.content)))
+            self.end_headers()
+            self.wfile.write(response.content)
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+
+    try:
+        with _serve_nginx(base, upstream.server_port) as running:
+            yield running
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        patch.undo()
+
+
+@pytest.mark.parametrize("path", [
+    "/apps/heimdall", "/apps/heimdall/", "/apps/heimdall/tab", "/apps/heimdall/a.b",
+    "/apps/heimdall/x.y/z", "/apps/heimdall/a.b/../tab",
+])
+def test_heimdall_documents_carry_the_framing_policy(proxy, path):
+    status, headers, body = proxy.get(path)
+    assert status == 200
+    assert body == DOCUMENT
+    assert headers.get("Content-Security-Policy") == HEIMDALL_POLICY
+    assert headers.get("Cache-Control") == "no-store, must-revalidate"
+
+
+@pytest.mark.parametrize("path", [
+    "/apps/ordinary", "/apps/ordinary/tab", "/apps/ordinary/a.b", "/apps/ordinary/x.y/z",
+])
+def test_other_app_documents_have_no_policy(proxy, path):
+    status, headers, body = proxy.get(path)
+    assert status == 200
+    assert body == DOCUMENT
+    assert "Content-Security-Policy" not in headers
+
+
+def test_real_assets_keep_the_static_handler(proxy):
+    status, headers, body = proxy.get("/assets/app.js")
+    assert status == 200
+    assert body == ASSET
+    # `expires 1y` and the location's own header both set Cache-Control.
+    assert headers.get_all("Cache-Control") == ["max-age=31536000", "public, immutable"]
+    assert "Expires" in headers
+    assert "Content-Security-Policy" not in headers
+
+    status, headers, _body = proxy.get("/apps/heimdall/x.js")
+    assert status == 404
+    assert "Content-Security-Policy" not in headers
+
+
+def test_encoded_exchange_still_redirects(proxy):
+    for path in ("/embed/apps/heimdall", "/%65mbed/apps/heimdall"):
+        status, headers, _body = proxy.get(f"{path}?{SIGNED_QUERY}")
+        assert status == 302, path
+        # Reduce to a boolean so a failure never prints the minted token.
+        redirected = headers.get("Location", "").startswith("/apps/heimdall#embed_token=")
+        assert redirected, path
+
+
+def _ids(cases):
+    # Test ids are printed: name each case by its label, never by its values.
+    return [case[0] for case in cases]
+
+
+REQUEST_CASES = [
+    ("canonical", f"/embed/apps/heimdall?{SIGNED_QUERY}", "GET /embed/apps/heimdall?[redacted] HTTP/1.1"),
+    ("encoded", f"/%65mbed/apps/heimdall?{SIGNED_QUERY}", "GET /%65mbed/apps/heimdall?[redacted] HTTP/1.1"),
+    ("double-slash", f"//embed/apps/heimdall?{SIGNED_QUERY}", "GET //embed/apps/heimdall?[redacted] HTTP/1.1"),
+    ("dot-segment", f"/./embed/apps/heimdall?{SIGNED_QUERY}", "GET /./embed/apps/heimdall?[redacted] HTTP/1.1"),
+    ("case", f"/EMBED/apps/heimdall?{SIGNED_QUERY}", "GET /EMBED/apps/heimdall?[redacted] HTTP/1.1"),
+    ("absolute-form", f"http://bifrost.test/embed/apps/heimdall?{SIGNED_QUERY}",
+     "GET http://bifrost.test/embed/apps/heimdall?[redacted] HTTP/1.1"),
+    ("hmac-elsewhere", f"/apps/ordinary?view=1&hmac={SIGNED_HMAC}", "GET /apps/ordinary?[redacted] HTTP/1.1"),
+    ("hmac-upper", f"/apps/ordinary?HMAC={SIGNED_HMAC}", "GET /apps/ordinary?[redacted] HTTP/1.1"),
+]
+
+REFERER_CASES = [
+    ("canonical", f"https://bifrost.example/embed/apps/heimdall?{SIGNED_QUERY}",
+     "https://bifrost.example/embed/apps/heimdall?[redacted]"),
+    ("encoded", f"https://bifrost.example/%65mbed/apps/heimdall?{SIGNED_QUERY}",
+     "https://bifrost.example/%65mbed/apps/heimdall?[redacted]"),
+    ("ordinary", "https://bifrost.example/apps/ordinary?view=1",
+     "https://bifrost.example/apps/ordinary?[redacted]"),
+    ("queryless", "https://bifrost.example/apps/ordinary", "https://bifrost.example/apps/ordinary"),
+]
+
+
+@pytest.mark.parametrize("label, target, logged", REQUEST_CASES, ids=_ids(REQUEST_CASES))
+def test_signed_request_queries_are_redacted(proxy, label, target, logged):
+    agent = f"request-{label}"
+    proxy.get(target, {"User-Agent": agent})
+    line = proxy.log_line(agent)
+    leaked = SIGNED_HMAC in line or "agent_id=" in line
+    assert not leaked, f"{label}: signed query logged"
+    redacted = f'"{logged}"' in line
+    assert redacted, f"{label}: request line not in the redacted shape"
+
+
+@pytest.mark.parametrize("label, referer, logged", REFERER_CASES, ids=_ids(REFERER_CASES))
+def test_referer_queries_are_redacted(proxy, label, referer, logged):
+    agent = f"referer-{label}"
+    proxy.get("/apps/ordinary", {"User-Agent": agent, "Referer": referer})
+    line = proxy.log_line(agent)
+    leaked = SIGNED_HMAC in line or "agent_id=" in line
+    assert not leaked, f"{label}: signed referer logged"
+    redacted = f'"{logged}"' in line
+    assert redacted, f"{label}: referer not in the redacted shape"
+
+
+def test_ordinary_requests_keep_their_query(proxy):
+    agent = "request-ordinary"
+    proxy.get("/apps/ordinary?view=list&page=2", {"User-Agent": agent})
+    assert '"GET /apps/ordinary?view=list&page=2 HTTP/1.1"' in proxy.log_line(agent)
+
+
+@pytest.fixture(scope="module")
+def failing_proxy(tmp_path_factory):
+    """The real config with its API upstream down (a closed loopback port)."""
+    base = tmp_path_factory.mktemp("nginx-down")
+    (base / "html").mkdir()
+    (base / "html/index.html").write_bytes(DOCUMENT)
+    with _serve_nginx(base, _free_port()) as running:
+        yield running
+
+
+SIGNED_REFERER = f"https://bifrost.example/embed/apps/heimdall?{SIGNED_QUERY}"
+
+UPSTREAM_FAILURE_CASES = [
+    ("canonical-embed", f"/embed/apps/heimdall?{SIGNED_QUERY}", {},
+     "GET /embed/apps/heimdall?[redacted] HTTP/1.1"),
+    ("encoded-embed", f"/%65mbed/apps/heimdall?{SIGNED_QUERY}", {},
+     "GET /%65mbed/apps/heimdall?[redacted] HTTP/1.1"),
+    ("signed-referer-on-api", "/api/offline-control", {"Referer": SIGNED_REFERER},
+     "GET /api/offline-control HTTP/1.1"),
+]
+
+
+@pytest.mark.parametrize(
+    "label, target, headers, logged", UPSTREAM_FAILURE_CASES, ids=_ids(UPSTREAM_FAILURE_CASES)
+)
+def test_upstream_failures_keep_signed_queries_out_of_every_log(
+    failing_proxy, label, target, headers, logged
+):
+    agent = f"down-{label}"
+    status, _headers, _body = failing_proxy.get(target, {"User-Agent": agent, **headers})
+    assert status == 502
+    line = failing_proxy.log_line(agent)
+    recorded = f'"{logged}" 502 ' in line
+    assert recorded, f"{label}: access log lacks the redacted 502 record"
+    # nginx writes the error line before the response, so it exists by now.
+    error_text = failing_proxy.error_log.read_text()
+    leaked = SIGNED_HMAC in error_text or "agent_id=" in error_text
+    assert not leaked, f"{label}: signed query in the nginx error log"
+
+
+def test_upstream_failure_control_keeps_status_but_no_request_detail(failing_proxy):
+    # The documented trade-off: an ordinary upstream failure is still a 502
+    # in the access log, but nginx writes no request-bound error line for it.
+    agent = "down-ordinary"
+    target = "/api/ordinary-control?view=1"
+    status, _headers, _body = failing_proxy.get(target, {"User-Agent": agent})
+    assert status == 502
+    assert '"GET /api/ordinary-control?view=1 HTTP/1.1" 502 ' in failing_proxy.log_line(agent)
+    error_text = failing_proxy.error_log.read_text()
+    # The file is the live error sink (start-up notices reach it at info) ...
+    assert "start worker process" in error_text
+    # ... and no request detail reached it.
+    assert "ordinary-control" not in error_text
+    assert "while connecting to upstream" not in error_text

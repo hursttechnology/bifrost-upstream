@@ -249,6 +249,35 @@ export interface AppCodeUser {
 export declare function useUser(): AppCodeUser;
 
 /**
+ * How this page was launched.
+ *
+ * `isEmbed` is true only when this tab holds a valid signed app embed session
+ * (not a form embed, and not a failed embed launch).
+ *
+ * `unsigned` holds the `ticket_id` and `client_id` values from the embed link,
+ * each 1 to 12 digits, and is empty unless `isEmbed`. These are UNSIGNED
+ * hints: the person in the frame can change them. Never use them for
+ * authorisation; a workflow must re-check anything it acts on.
+ */
+export interface AppCodeEmbedLaunch {
+	isEmbed: boolean;
+	unsigned: { ticket_id?: string; client_id?: string };
+}
+
+/**
+ * Hook to read how this page was launched (signed app embed or not), plus the
+ * UNSIGNED launch hints from the embed link. Never use the hints for
+ * authorisation. The returned object is stable for the life of the page.
+ *
+ * @example
+ * ```jsx
+ * const { isEmbed, unsigned } = useEmbedLaunch();
+ * const ticketHint = isEmbed ? unsigned.ticket_id : undefined;
+ * ```
+ */
+export declare function useEmbedLaunch(): AppCodeEmbedLaunch;
+
+/**
  * Hook to get URL path parameters from the current route.
  * Returns all dynamic segments defined in the route path.
  *
@@ -721,6 +750,7 @@ export interface PlatformScope {
 	useWorkflowQuery: typeof useWorkflowQuery;
 	useWorkflowMutation: typeof useWorkflowMutation;
 	useUser: typeof useUser;
+	useEmbedLaunch: typeof useEmbedLaunch;
 	useParams: typeof useParams;
 	useSearchParams: typeof useSearchParams;
 	useNavigate: typeof useNavigate;

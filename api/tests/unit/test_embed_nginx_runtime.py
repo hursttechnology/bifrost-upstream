@@ -178,3 +178,67 @@ def test_real_assets_keep_the_static_handler(proxy):
     assert status == 404
     assert "Content-Security-Policy" not in headers
 
+
+def test_encoded_exchange_still_redirects(proxy):
+    for path in ("/embed/apps/heimdall", "/%65mbed/apps/heimdall"):
+        status, headers, _body = proxy.get(f"{path}?{SIGNED_QUERY}")
+        assert status == 302, path
+        # Reduce to a boolean so a failure never prints the minted token.
+        redirected = headers.get("Location", "").startswith("/apps/heimdall#embed_token=")
+        assert redirected, path
+
+
+def _ids(cases):
+    # Test ids are printed: name each case by its label, never by its values.
+    return [case[0] for case in cases]
+
+
+REQUEST_CASES = [
+    ("canonical", f"/embed/apps/heimdall?{SIGNED_QUERY}", "GET /embed/apps/heimdall?[redacted] HTTP/1.1"),
+    ("encoded", f"/%65mbed/apps/heimdall?{SIGNED_QUERY}", "GET /%65mbed/apps/heimdall?[redacted] HTTP/1.1"),
+    ("double-slash", f"//embed/apps/heimdall?{SIGNED_QUERY}", "GET //embed/apps/heimdall?[redacted] HTTP/1.1"),
+    ("dot-segment", f"/./embed/apps/heimdall?{SIGNED_QUERY}", "GET /./embed/apps/heimdall?[redacted] HTTP/1.1"),
+    ("case", f"/EMBED/apps/heimdall?{SIGNED_QUERY}", "GET /EMBED/apps/heimdall?[redacted] HTTP/1.1"),
+    ("absolute-form", f"http://bifrost.test/embed/apps/heimdall?{SIGNED_QUERY}",
+     "GET http://bifrost.test/embed/apps/heimdall?[redacted] HTTP/1.1"),
+    ("hmac-elsewhere", f"/apps/ordinary?view=1&hmac={SIGNED_HMAC}", "GET /apps/ordinary?[redacted] HTTP/1.1"),
+    ("hmac-upper", f"/apps/ordinary?HMAC={SIGNED_HMAC}", "GET /apps/ordinary?[redacted] HTTP/1.1"),
+]
+
+REFERER_CASES = [
+    ("canonical", f"https://bifrost.example/embed/apps/heimdall?{SIGNED_QUERY}",
+     "https://bifrost.example/embed/apps/heimdall?[redacted]"),
+    ("encoded", f"https://bifrost.example/%65mbed/apps/heimdall?{SIGNED_QUERY}",
+     "https://bifrost.example/%65mbed/apps/heimdall?[redacted]"),
+    ("ordinary", "https://bifrost.example/apps/ordinary?view=1",
+     "https://bifrost.example/apps/ordinary?[redacted]"),
+    ("queryless", "https://bifrost.example/apps/ordinary", "https://bifrost.example/apps/ordinary"),
+]
+
+
+@pytest.mark.parametrize("label, target, logged", REQUEST_CASES, ids=_ids(REQUEST_CASES))
+def test_signed_request_queries_are_redacted(proxy, label, target, logged):
+    agent = f"request-{label}"
+    proxy.get(target, {"User-Agent": agent})
+    line = proxy.log_line(agent)
+    leaked = SIGNED_HMAC in line or "agent_id=" in line
+    assert not leaked, f"{label}: signed query logged"
+    redacted = f'"{logged}"' in line
+    assert redacted, f"{label}: request line not in the redacted shape"
+
+
+@pytest.mark.parametrize("label, referer, logged", REFERER_CASES, ids=_ids(REFERER_CASES))
+def test_referer_queries_are_redacted(proxy, label, referer, logged):
+    agent = f"referer-{label}"
+    proxy.get("/apps/ordinary", {"User-Agent": agent, "Referer": referer})
+    line = proxy.log_line(agent)
+    leaked = SIGNED_HMAC in line or "agent_id=" in line
+    assert not leaked, f"{label}: signed referer logged"
+    redacted = f'"{logged}"' in line
+    assert redacted, f"{label}: referer not in the redacted shape"
+
+
+def test_ordinary_requests_keep_their_query(proxy):
+    agent = "request-ordinary"
+    proxy.get("/apps/ordinary?view=list&page=2", {"User-Agent": agent})
+    assert '"GET /apps/ordinary?view=list&page=2 HTTP/1.1"' in proxy.log_line(agent)

@@ -32,7 +32,50 @@ def test_access_records_preserve_format_and_redact_query(protocol, status):
     assert "test-only" not in rendered
 
 
-@pytest.mark.parametrize("path", ["/api/apps?search=ordinary", "/embedding?x=1", "/embed/apps/heimdall", "/api/embed/ordinary?x=1"])
+ALIAS_TARGETS = [
+    ("/%65mbed/apps/heimdall?agent_id=1&hmac=test-only", "/%65mbed/apps/heimdall?[redacted]"),
+    ("//embed/apps/heimdall?agent_id=1&hmac=test-only", "//embed/apps/heimdall?[redacted]"),
+    ("/./embed/apps/heimdall?agent_id=1&hmac=test-only", "/./embed/apps/heimdall?[redacted]"),
+    ("/apps/../embed/apps/heimdall?agent_id=1&hmac=test-only", "/apps/../embed/apps/heimdall?[redacted]"),
+    ("/EMBED/apps/heimdall?agent_id=1&hmac=test-only", "/EMBED/apps/heimdall?[redacted]"),
+    ("/api/apps?view=1&hmac=test-only", "/api/apps?[redacted]"),
+    ("/api/apps?HMAC=test-only", "/api/apps?[redacted]"),
+    ("/api/apps?h%6Dac=test-only", "/api/apps?[redacted]"),
+]
+ALIAS_IDS = ["encoded", "double-slash", "dot-segment", "parent-segment", "case", "hmac", "hmac-upper", "hmac-encoded"]
+
+
+@pytest.mark.parametrize("target, expected", ALIAS_TARGETS, ids=ALIAS_IDS)
+def test_access_records_redact_path_aliases_and_hmac_queries(target, expected):
+    record = logging.LogRecord("uvicorn.access", logging.INFO, "", 1, '%s - "%s %s HTTP/%s" %d',
+                               ("127.0.0.1:1234", "GET", target, "1.1", 302), None)
+    assert redactor().filter(record)
+    assert record.args == ("127.0.0.1:1234", "GET", expected, "1.1", 302)
+
+
+@pytest.mark.parametrize("target, expected", ALIAS_TARGETS, ids=ALIAS_IDS)
+def test_diagnostics_redact_path_aliases_and_hmac_queries(target, expected):
+    record = logging.LogRecord("uvicorn.error", logging.ERROR, "", 1,
+                               "Failed https://bifrost.example%s for client", (target,), None)
+    redactor().filter(record)
+    assert record.getMessage() == f"Failed https://bifrost.example{expected}"
+
+
+@pytest.mark.parametrize("message, expected", [
+    ("Failed /api/a?x=1 then /EMBED/apps/heimdall?hmac=test-only", "Failed /api/a?x=1 then /EMBED/apps/heimdall?[redacted]"),
+    ("Failed /api/x?value='a b'&hmac=test-only", "Failed /api/x?[redacted]"),
+    ("Failed /api/apps?search=ordinary and /embedding?x=1", "Failed /api/apps?search=ordinary and /embedding?x=1"),
+], ids=["second-occurrence", "quoted-hmac-query", "ordinary"])
+def test_diagnostics_check_every_query_on_a_line(message, expected):
+    record = logging.LogRecord("uvicorn.error", logging.ERROR, "", 1, message, (), None)
+    redactor().filter(record)
+    assert record.getMessage() == expected
+
+
+@pytest.mark.parametrize("path", [
+    "/api/apps?search=ordinary", "/embedding?x=1", "/embed/apps/heimdall", "/api/embed/ordinary?x=1",
+    "/api/apps?hmacs=1", "/api/apps?x=hmac",
+])
 def test_other_paths_and_queryless_requests_unchanged(path):
     args = ("127.0.0.1:1234", "GET", path, "1.1", 200)
     record = logging.LogRecord("uvicorn.access", logging.INFO, "", 1, '%s - "%s %s HTTP/%s" %d', args, None)

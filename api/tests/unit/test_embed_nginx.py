@@ -58,13 +58,22 @@ def test_app_document_location_leaves_real_assets_to_the_static_handler(path, ha
     assert winner == handler
 
 
+REQUEST_MAP = 'map "$embed_log_redact $request" $embed_log_request {'
+REFERER_MAP = "map $http_referer $embed_log_referer {"
+
+
 def test_access_log_uses_redacted_request_and_referer():
-    request_map = block("map $request $embed_log_request {")
+    assert "~^\\S+\\s/embed/ 1;" in block("map $request $embed_log_raw {")
+    assert "~*^/embed/ 1;" in block("map $uri $embed_log_normalised {")
+    redact = block('map "$embed_log_raw$embed_log_normalised$arg_hmac" $embed_log_redact {')
+    assert '"" "";' in redact
+    assert "default 1;" in redact
+    request_map = block(REQUEST_MAP)
     assert "default $request;" in request_map
-    assert '"$embed_log_method $embed_log_path?[redacted] $embed_log_protocol";' in request_map
-    referer_map = block("map $http_referer $embed_log_referer {")
+    assert '"$embed_log_method $embed_log_path?[redacted]$embed_log_protocol";' in request_map
+    referer_map = block(REFERER_MAP)
     assert "default $http_referer;" in referer_map
-    assert '"$embed_log_referer_path?[redacted]";' in referer_map
+    assert '"$embed_log_referer_base?[redacted]";' in referer_map
     log_format = CONF.split("log_format embed_redacted ", 1)[1].split(";", 1)[0]
     assert " ".join(log_format.split()) == (
         "'$remote_addr - $remote_user [$time_local] \"$embed_log_request\" ' "
@@ -76,26 +85,34 @@ def test_access_log_uses_redacted_request_and_referer():
     assert CONF.count("access_log ") == 1
 
 
-@pytest.mark.parametrize("kind, value, expected", [
-    ("request", "GET /embed/apps/heimdall?agent_id=1&hmac=test-only HTTP/1.1", "GET /embed/apps/heimdall?[redacted] HTTP/1.1"),
-    ("request", "POST /embed/forms/example?x=test-only HTTP/2.0", "POST /embed/forms/example?[redacted] HTTP/2.0"),
-    ("request", "GET /api/apps?x=ordinary HTTP/1.1", None),
-    ("request", "GET /embed/apps/heimdall HTTP/1.1", None),
-    ("referer", "https://bifrost.example/embed/apps/heimdall?agent_id=1&hmac=test-only", "https://bifrost.example/embed/apps/heimdall?[redacted]"),
-    ("referer", "/embed/forms/example?x=test-only", "/embed/forms/example?[redacted]"),
-    ("referer", "https://bifrost.example/apps/ordinary?x=ordinary", None),
-    ("referer", "https://bifrost.example/embed/apps/heimdall", None),
-], ids=["app", "form", "ordinary", "queryless", "absolute-referer", "relative-referer", "ordinary-referer", "queryless-referer"])
-def test_log_map_patterns(kind, value, expected):
-    source = "$request" if kind == "request" else "$http_referer"
-    contents = block(f"map {source} $embed_log_{kind} {{")
-    rule = re.search(r'~(\S+)\s+"([^"]+)";', contents)
+def _apply_map_rule(marker, value):
+    """Apply a map's single regex rule; None means the map's default applies."""
+    rule = re.search(r'~(\S+)\s+"([^"]+)";', block(marker))
     assert rule is not None
-    pattern = re.sub(r"\(\?<([a-z_]+)>", r"(?P<\1>", rule[1])
-    match = re.search(pattern, value)
-    if expected is None:
-        assert match is None
-    else:
-        assert match is not None
-        result = re.sub(r"\$([a-z_]+)", lambda m: match[m[1]], rule[2])
-        assert result == expected
+    match = re.search(re.sub(r"\(\?<([a-z_]+)>", r"(?P<\1>", rule[1]), value)
+    if match is None:
+        return None
+    return re.sub(r"\$([a-z_]+)", lambda m: match[m[1]] or "", rule[2])
+
+
+@pytest.mark.parametrize("redact, request_line, expected", [
+    ("1", "GET /embed/apps/heimdall?agent_id=1&hmac=test-only HTTP/1.1", "GET /embed/apps/heimdall?[redacted] HTTP/1.1"),
+    ("1", "POST /%65mbed/forms/example?x=test-only HTTP/2.0", "POST /%65mbed/forms/example?[redacted] HTTP/2.0"),
+    ("1", "GET http://host/embed/apps/heimdall?hmac=test-only HTTP/1.1", "GET http://host/embed/apps/heimdall?[redacted] HTTP/1.1"),
+    ("1", "GET /embed/a b?hmac=test-only x HTTP/1.1", "GET /embed/a b?[redacted] HTTP/1.1"),
+    ("1", "GET /embed/apps/heimdall?hmac=test-only", "GET /embed/apps/heimdall?[redacted]"),
+    ("1", "GET /embed/apps/heimdall HTTP/1.1", None),
+    ("", "GET /api/apps?x=ordinary HTTP/1.1", None),
+], ids=["canonical", "encoded", "absolute-form", "space-in-target", "no-protocol", "queryless", "ordinary"])
+def test_request_map_pattern(redact, request_line, expected):
+    assert _apply_map_rule(REQUEST_MAP, f"{redact} {request_line}") == expected
+
+
+@pytest.mark.parametrize("referer, expected", [
+    ("https://bifrost.example/embed/apps/heimdall?agent_id=1&hmac=test-only", "https://bifrost.example/embed/apps/heimdall?[redacted]"),
+    ("https://bifrost.example/%65mbed/apps/heimdall?hmac=test-only", "https://bifrost.example/%65mbed/apps/heimdall?[redacted]"),
+    ("https://bifrost.example/apps/ordinary?x=ordinary", "https://bifrost.example/apps/ordinary?[redacted]"),
+    ("https://bifrost.example/apps/ordinary", None),
+], ids=["canonical", "encoded", "ordinary", "queryless"])
+def test_referer_map_pattern(referer, expected):
+    assert _apply_map_rule(REFERER_MAP, referer) == expected

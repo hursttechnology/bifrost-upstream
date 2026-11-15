@@ -1,16 +1,42 @@
 """Remove bearer query strings from embed access and exception logs."""
 
 import logging
+import posixpath
 import re
+from urllib.parse import parse_qsl, unquote
 
 
-# In free-form diagnostics, discard the rest of that line too: quotes or
-# spaces in a query must not expose the remainder as apparent diagnostic text.
-_EMBED_QUERY = re.compile(r"(/embed/[^\s?\"']*\?)[^\r\n]*")
+# A path (after any scheme and host) followed by its query, in free-form text.
+_PATH_QUERY = re.compile(r"(?:[A-Za-z][A-Za-z0-9+.-]*://[^/\s?\"']*)?(/[^\s?\"']*)\?([^\s\"']*)")
+
+
+def _signed(path: str, query: str) -> bool:
+    """True for any spelling of an embed path, or a query with an hmac key."""
+    collapsed = re.sub(r"/+", "/", unquote(path))
+    normalised = posixpath.normpath(collapsed) if collapsed else collapsed
+    # Appending "/" lets "/embed" match while "/embedding" does not.
+    if f"{normalised}/".casefold().startswith("/embed/"):
+        return True
+    return any(key.casefold() == "hmac" for key, _ in parse_qsl(query, keep_blank_values=True))
+
+
+def _redact_target(target: str) -> str:
+    path, separator, query = target.partition("?")
+    return f"{path}?[redacted]" if separator and _signed(path, query) else target
+
+
+def _redact_line(line: re.Match[str]) -> str:
+    # Discard the rest of the line after a signed query: quotes or spaces in
+    # it must not expose the remainder as apparent diagnostic text.
+    text = line[0]
+    for match in _PATH_QUERY.finditer(text):
+        if _signed(match[1], text[match.start(2):]):
+            return f"{text[:match.start(2)]}[redacted]"
+    return text
 
 
 def _redact(text: str) -> str:
-    return _EMBED_QUERY.sub(r"\1[redacted]", text)
+    return re.sub(r"[^\r\n]+", _redact_line, text)
 
 
 class EmbedQueryFilter(logging.Filter):
@@ -19,8 +45,8 @@ class EmbedQueryFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if record.name == "uvicorn.access" and isinstance(record.args, tuple) and len(record.args) == 5:
             client, method, path, version, status = record.args
-            if isinstance(path, str) and path.startswith("/embed/"):
-                record.args = (client, method, _redact(path), version, status)
+            if isinstance(path, str):
+                record.args = (client, method, _redact_target(path), version, status)
         else:
             record.msg = _redact(record.getMessage())
             record.args = ()
